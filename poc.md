@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="/baniere.png" alt="Banner">
+</p>
+
 # MP3-PROJECT | Framework de Gestion
 
 ---
