@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 300" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Auris-MP3 — POC-1">
+
+  <!-- =========================================================================
+       BANNIÈRE AURIS-MP3 · Template réutilisable
+       Pour adapter à un autre POC, modifie uniquement les zones marquées [EDIT].
+       Palette : bleu / blanc (modifiable dans le bloc defs ci-dessous).
+       ========================================================================= -->
+
+  <defs>
+    <!-- [EDIT] Palette — change ces deux couleurs pour changer le ton du fond -->
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%"   stop-color="#0a2540"/>
+      <stop offset="100%" stop-color="#1e6fd9"/>
+    </linearGradient>
+
+    <!-- Grille décorative subtile -->
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#ffffff" stroke-opacity="0.06" stroke-width="1"/>
+    </pattern>
+  </defs>
+
+  <!-- ===== Fond ===== -->
+  <rect width="1200" height="300" fill="url(#bg)"/>
+  <rect width="1200" height="300" fill="url(#grid)"/>
+
+  <!-- ===== Onde audio décorative (gauche) ===== -->
+  <g transform="translate(80, 150)" fill="#ffffff" fill-opacity="0.85">
+    <rect x="0"   y="-30" width="6" height="60"  rx="3"/>
+    <rect x="14"  y="-50" width="6" height="100" rx="3"/>
+    <rect x="28"  y="-20" width="6" height="40"  rx="3"/>
+    <rect x="42"  y="-60" width="6" height="120" rx="3"/>
+    <rect x="56"  y="-40" width="6" height="80"  rx="3"/>
+    <rect x="70"  y="-15" width="6" height="30"  rx="3"/>
+    <rect x="84"  y="-55" width="6" height="110" rx="3"/>
+    <rect x="98"  y="-25" width="6" height="50"  rx="3"/>
+  </g>
+
+  <!-- ===== Onde audio décorative (droite, miroir) ===== -->
+  <g transform="translate(1010, 150)" fill="#ffffff" fill-opacity="0.55">
+    <rect x="0"   y="-25" width="6" height="50"  rx="3"/>
+    <rect x="14"  y="-45" width="6" height="90"  rx="3"/>
+    <rect x="28"  y="-15" width="6" height="30"  rx="3"/>
+    <rect x="42"  y="-55" width="6" height="110" rx="3"/>
+    <rect x="56"  y="-35" width="6" height="70"  rx="3"/>
+    <rect x="70"  y="-20" width="6" height="40"  rx="3"/>
+    <rect x="84"  y="-50" width="6" height="100" rx="3"/>
+    <rect x="98"  y="-30" width="6" height="60"  rx="3"/>
+  </g>
+
+  <!-- ===== [EDIT] Titre principal ===== -->
+  <text x="240" y="140"
+        font-family="'Segoe UI', system-ui, -apple-system, sans-serif"
+        font-size="64" font-weight="800" fill="#ffffff" letter-spacing="2">
+    Auris-MP3
+  </text>
+
+  <!-- ===== [EDIT] Sous-titre ===== -->
+  <text x="242" y="180"
+        font-family="'Segoe UI', system-ui, -apple-system, sans-serif"
+        font-size="20" font-weight="400" fill="#ffffff" fill-opacity="0.75">
+    Projet IOT · Epitech Marseille
+  </text>
+
+  <!-- ===== [EDIT] Badge POC — change "POC-1" pour POC-2, POC-3, etc. ===== -->
+  <g transform="translate(240, 210)">
+    <rect x="0" y="0" width="120" height="40" rx="20" fill="#ffffff"/>
+    <text x="60" y="26"
+          font-family="'Segoe UI', system-ui, -apple-system, sans-serif"
+          font-size="18" font-weight="700" fill="#0a2540" text-anchor="middle">
+      POC-1
+    </text>
+  </g>
+
+  <!-- ===== Liseré bas ===== -->
+  <rect x="0" y="294" width="1200" height="6" fill="#ffffff"/>
+
+</svg>
