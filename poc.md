@@ -30,45 +30,43 @@ Nous avons eu l'approbation de notre référent pédagogique ainsi que celle du 
 *Définition de l'architecture et de la méthodologie.*
 
 * **Méthodologie - (Comment allons-nous procéder ? (Agile, Cycle en V, etc.)):**
-Nous avons choisis la méthode Aglile pour plusieurs raisons. Dans un premier temps dans le monde de l'informatique cette pratique est très répendu et permet une évolution rapide et claire du projet. La deuxième est raison est que nous ne connaissons pas la suite du projet, cette méthode permet de décomposer en plusieurs étape des phases de developpement.
-Pour ce premier Sprint voici les étapes:
+Nous avons choisi la méthode Agile pour plusieurs raisons. Dans un premier temps, dans le monde de l'informatique, cette pratique est très répandue et permet une évolution rapide et claire du projet. La deuxième raison est que nous ne connaissons pas la suite du projet : cette méthode permet de décomposer les phases de développement en plusieurs étapes.
+Pour ce premier Sprint, voici les étapes :
     - Rédaction du POC
-    - Design rapide (améliorer cette phase lors des prochaines versions)
-    - Achat de materiel IOT
-    - Développement de code c/c++ pour l'esp et ces modules
+    - Design rapide (à améliorer lors des prochaines versions)
+    - Achat de matériel IOT
+    - Développement de code C/C++ pour l'ESP et ses modules
     - Test du code sur la version du MP3
     - Phase de review du projet construit et terminé
     - Fin et documentation finale (conclusion de ce premier cycle)
 
-```
-Partie à mettre à jour !
+> Partie à mettre à jour !
 
 * **Flux de données :**
     * Quelles seront les **entrées** (Inputs) ?
     * Quelles seront les **sorties** (Outputs) ?
     * Quels seront les **processus de transformation** ?
-```
 
 * **Ingénierie - (Spécifications techniques détaillées.):**
-Notre première version du lecteur Auris, integrera plusieur module. Nous avons déjà éffectuer des recherches sur les différents composé primmaire de l'outil.
-Composants:
+Notre première version du lecteur Auris intégrera plusieurs modules. Nous avons déjà effectué des recherches sur les différents composants primaires de l'outil.
+Composants :
     - ESP32-S3      -> carte de développement économique et polyvalente
     - DAC/PCM1501   -> convertisseur numérique-analogique
-    - DISPLAY/LCD   -> écran noir et blanc permetant d'afficher du texte
-    - SDCARD        -> stockage externe pour stocker des donées (musique,autres)
-    - BREADBOARD    -> platines d'expérimentation pour créer des circuits electriques sans soudures.
-Nous devrons égalements passé par une phase d'impression 3D (surement prochain sprint).
+    - DISPLAY/LCD   -> écran noir et blanc permettant d'afficher du texte
+    - SDCARD        -> stockage externe pour stocker des données (musique, autres)
+    - BREADBOARD    -> platine d'expérimentation pour créer des circuits électriques sans soudures.
+Nous devrons également passer par une phase d'impression 3D (sûrement au prochain sprint).
 
 * **Chronologie - (Estimation précise du temps de réalisation (Roadmap)):**
 | Phase | Durée | Retard |
 |:----- |:-----:|:------:|
-| Rédaction du POC | 2 Semaine | NULL |
+| Rédaction du POC | 2 semaines | NULL |
 | Design rapide | NULL | NULL |
-| Achat de materiel IOT | 1 Semaine | NULL |
-| Développement | 2 Semaine | NULL |
-| Test du code | 1 Semaine | NULL |
-| Review | 4 Jours | NULL |
-| Conclusion | 4 Jours | NULL |
+| Achat de matériel IOT | 1 semaine | NULL |
+| Développement | 2 semaines | NULL |
+| Test du code | 1 semaine | NULL |
+| Review | 4 jours | NULL |
+| Conclusion | 4 jours | NULL |
 
 ---
 
