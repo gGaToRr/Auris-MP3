@@ -71,6 +71,16 @@
     </text>
   </g>
 
+  <!-- ===== [EDIT] Badge AGILE STEP — placé à droite du badge POC ===== -->
+  <g transform="translate(376, 210)">
+    <rect x="0" y="0" width="220" height="40" rx="20" fill="none" stroke="#ffffff" stroke-width="2"/>
+    <text x="110" y="26"
+          font-family="'Segoe UI', system-ui, -apple-system, sans-serif"
+          font-size="16" font-weight="700" fill="#ffffff" text-anchor="middle">
+      AGILE · Prototype 1
+    </text>
+  </g>
+
   <!-- ===== Liseré bas ===== -->
   <rect x="0" y="294" width="1200" height="6" fill="#ffffff"/>
 
