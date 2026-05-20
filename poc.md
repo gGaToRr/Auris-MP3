@@ -2,18 +2,27 @@
   <img src="/baniere.png" alt="Banner">
 </p>
 
-# MP3-PROJECT | Framework de Gestion
+# Auris-Mp3 | Projet IOT by student of Epitech Marseille
 
 ---
 
-## I. Initiation : La Genèse du Projet
+## I. Initiation : Le commencement du Projet
 *Cadrage stratégique et validation du concept.*
 
-* **Différenciation :** Mon idée est-elle unique ?
-* **Impact :** Ce produit fera-t-il une différence sensible ?
-* **Faisabilité :** Avons-nous besoin de valider sa faisabilité technique ou économique ?
-* **Objectifs :** Quels résultats concrets voulons-nous obtenir ?
-* **Go/No-Go :** Approbation de procéder à une **Preuve de Concept (PoC)** ?
+* **Différenciation - (Mon idée est-elle unique ?):** 
+Mon idée n'est pas unique, on reprend un concept existant mais on souhaite l'améliorer, le moderniser. L'idée est de retrouver un support unique pour écouter de la musique (arrêter le streaming digital).
+
+* **Impact - (Ce produit fera-t-il une différence sensible ?):**
+Avec un lecteur mp3 de nouvel génération nous intégrerons le wifi ainsi que le bluetooth pour une meilleure connectivé entre ces différents appareils. La prise en charge de différent format audio est elle aussi très pertinante. 
+
+* **Faisabilité - (Avons-nous besoin de valider sa faisabilité technique ou économique ?):** 
+Grâce au cadre fournis par notre établissement scolaire, nous avons la chance d'acceder à nos composant gratuitement. En terme de bagage technique nécéssaire (programation). Nous allons nous en sortir globalement. Le projet évoluera au fil du temps ainsi que le code.
+
+* **Objectifs - (Quels résultats concrets voulons-nous obtenir ?):**
+Nous souhaitons dans un concevoir une premiere version, celle-ci ne sera pas parfaite mais elle nous permettera de comprendre et de grandir des erreurs qu'on commet ou commetera. L'idée aujourd'hui est de **réussir à faire fonctioner un ESP32-S3 avec son DAC(convertisseur numérique-analogique) et un ecran oled pour afficher quelques informations. Pour le futur, l'amélioration de notre premier jet, conception d'un boitier en imprimente 3D et le reste sera étudié après.
+
+* **Go/No-Go - (Approbation de procéder à une Preuve de Concept (PoC) ?):** 
+Nous avons eu l'approbation de notre référent pédagogique ainsi que le dirigeant du HUB (salle d'inovation fournie par notre école). 
 
 ---
 
