@@ -1,6 +1,4 @@
-<p align="center">
-  <img src="baniere.png" alt="Bannière Auris" width="100%">
-</p>
+*bannière / logo ic*
 
 <p align="center">
   <img src="https://img.shields.io/badge/Projet-%C3%89tudiant-blue?style=flat-square" alt="Projet Étudiant">
