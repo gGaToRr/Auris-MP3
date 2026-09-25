@@ -1,3 +1,66 @@
-.qodo/
+# ==========================================
+# ESP-IDF Build Outputs & Configurations
+# ==========================================
 build/
-.vcode/
+sdkconfig
+sdkconfig.old
+sdkconfig.ci
+
+# Keep project defaults for repeatable builds
+!sdkconfig.defaults
+!sdkconfig.defaults.*
+
+# ==========================================
+# ESP-IDF Component Manager
+# ==========================================
+# External components are downloaded automatically via idf_component.yml
+managed_components/
+
+# Lock file (optional: keep if you want strict component version pinning)
+# dependencies.lock
+
+# ==========================================
+# Build System & Language Tools
+# ==========================================
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CMakeLists.txt.user
+compile_commands.json
+*.elf
+*.bin
+*.map
+
+# ==========================================
+# IDEs and Editors
+# ==========================================
+# VS Code
+.vscode/*
+!.vscode/extensions.json
+!.vscode/tasks.json
+!.vscode/launch.json
+
+# CLion / Eclipse / Other IDEs
+.idea/
+.clang-format
+*.swp
+*.swo
+*~
+
+# ==========================================
+# Python & Environment
+# ==========================================
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.venv/
+env/
+
+# ==========================================
+# OS Generated Files
+# ==========================================
+.DS_Store
+.DS_Store?
+ehthumbs.db
+Thumbs.db

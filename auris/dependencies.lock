@@ -1,0 +1,21 @@
+dependencies:
+  espressif/esp_lcd_qemu_rgb:
+    component_hash: e8981dd7399504a5ab647ce28a4876f8467c03b759895f50c24f0cb6095faaa0
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.3'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.0.2
+  idf:
+    source:
+      type: idf
+    version: 6.0.1
+direct_dependencies:
+- espressif/esp_lcd_qemu_rgb
+- idf
+manifest_hash: cd60a43123fd44da54c37182eac389849a06bb3d4420c8ec771c14b20955d039
+target: esp32s3
+version: 3.0.0
