@@ -1,0 +1,14 @@
+# Ignore editor history
+schematic/.history/
+.history/
+
+# KiCad backup, temporary, and log files
+*.bak
+*.bck
+*.kicad_prl
+*.log
+*-bak
+*-backups/
+_autosave-*
+_restore_backup_*/
+fp-info-cache
