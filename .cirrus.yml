@@ -1,0 +1,29 @@
+build_task:
+  name: "ESP-IDF Build"
+  container:
+    image: espressif/idf:v5.4
+  build_script:
+    - cd auris
+    - . $IDF_PATH/export.sh
+    - idf.py set-target esp32s3
+    - idf.py build
+  binaries_artifacts:
+    path: "auris/build/*.bin"
+
+cppcheck_task:
+  name: "Static Analysis"
+  container:
+    image: ubuntu:24.04
+  install_script:
+    - apt-get update && apt-get install -y cppcheck
+  check_script:
+    - cppcheck
+        --enable=warning,style,performance,portability
+        --error-exitcode=1
+        --suppress=missingIncludeSystem
+        --inline-suppr
+        --language=c
+        --std=c11
+        -I auris/main
+        -I auris/main/include
+        auris/main/*.c
