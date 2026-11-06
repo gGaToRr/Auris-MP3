@@ -6,7 +6,9 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_lcd_panel_ops.h"
-#include "esp_lcd_qemu_rgb.h"
+#include "driver/spi_master.h"
+#include "esp_lcd_panel_io.h"
+#include "esp_lcd_ili9488.h"
 #include "driver/i2s_std.h"
 #include "esp_vfs_fat.h"
 
@@ -19,15 +21,22 @@ static const char *TAG = "AURIS_MAIN";
 static wl_handle_t s_wl_handle = WL_INVALID_HANDLE;
 
 // Display Configuration
-#define LCD_H_RES 480
+#define LCD_H_RES 320
 #define LCD_V_RES 480
+
+#define LCD_SPI_HOST    SPI2_HOST
+#define LCD_SCLK_PIN    GPIO_NUM_12
+#define LCD_MOSI_PIN    GPIO_NUM_11
+#define LCD_CS_PIN      GPIO_NUM_10
+#define LCD_DC_PIN      GPIO_NUM_9
+#define LCD_RST_PIN     GPIO_NUM_6
+#define LCD_BL_PIN      GPIO_NUM_7
 
 // I2S Hardware Output Pins for ESP32-S3
 //
-// MCLK/BCLK/WS/DOUT is the standard 16-bit I2S pin group. MCLK is not optional
-// here: the PCM5102A DAC takes its master clock on SCKI and will not produce
-// audio without it, and i2s_channel_init_std_mode() silently skips a pin left at
-// I2S_GPIO_UNUSED, so leaving it out gives a clean boot log and no sound.
+// MCLK/BCLK/WS/DOUT is the standard I2S pin group. The PCM5102A accepts the
+// 32-bit stereo I2S frame used below, with the 16-bit decoded samples
+// left-aligned in each slot.
 #define I2S_MCLK_PIN   GPIO_NUM_8
 #define I2S_BCLK_PIN   GPIO_NUM_16
 #define I2S_WS_PIN     GPIO_NUM_17
@@ -75,18 +84,60 @@ void mount_virtual_storage(void)
 // ---------------------------------------------------------------------------
 void display_task(void *pvParameters)
 {
-    ESP_LOGI(TAG, "Initializing QEMU RGB Display...");
+    (void)pvParameters;
+    ESP_LOGI(TAG, "Initializing ILI9488 SPI display...");
+
+    gpio_config_t bl_config = {
+        .pin_bit_mask = 1ULL << LCD_BL_PIN,
+        .mode = GPIO_MODE_OUTPUT,
+    };
+    ESP_ERROR_CHECK(gpio_config(&bl_config));
+    gpio_set_level(LCD_BL_PIN, 0);
+
+    spi_bus_config_t bus_config = {
+        .sclk_io_num = LCD_SCLK_PIN,
+        .mosi_io_num = LCD_MOSI_PIN,
+        .miso_io_num = -1,
+        .quadwp_io_num = -1,
+        .quadhd_io_num = -1,
+        .max_transfer_sz = LCD_H_RES * 40 * 3,
+    };
+    ESP_ERROR_CHECK(spi_bus_initialize(LCD_SPI_HOST, &bus_config, SPI_DMA_CH_AUTO));
+
+    esp_lcd_panel_io_handle_t io_handle = NULL;
+    esp_lcd_panel_io_spi_config_t io_config = {
+        .dc_gpio_num = LCD_DC_PIN,
+        .cs_gpio_num = LCD_CS_PIN,
+        .pclk_hz = 20 * 1000 * 1000,
+        .lcd_cmd_bits = 8,
+        .lcd_param_bits = 8,
+        .spi_mode = 0,
+        .trans_queue_depth = 10,
+    };
+    ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_SPI_HOST,
+                                             &io_config, &io_handle));
 
     esp_lcd_panel_handle_t panel_handle = NULL;
-    esp_lcd_rgb_qemu_config_t qemu_config = {
-        .width = LCD_H_RES,
-        .height = LCD_V_RES,
-        .bpp = RGB_QEMU_BPP_16,   // frame buffer holds RGB565 pixels
+    esp_lcd_panel_dev_config_t panel_config = {
+        .reset_gpio_num = LCD_RST_PIN,
+        .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_BGR,
+        .bits_per_pixel = 18,
     };
 
-    ESP_ERROR_CHECK(esp_lcd_new_rgb_qemu(&qemu_config, &panel_handle));
+    ESP_ERROR_CHECK(esp_lcd_new_panel_ili9488(io_handle, &panel_config,
+                                              LCD_H_RES * 40 * sizeof(uint16_t),
+                                              &panel_handle));
     ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
-    ESP_ERROR_CHECK(player_ui_init(panel_handle, LCD_H_RES, LCD_V_RES));
+    esp_err_t ui_err = player_ui_init(panel_handle, LCD_H_RES, LCD_V_RES);
+    if (ui_err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to allocate display framebuffer: %s", esp_err_to_name(ui_err));
+        esp_lcd_panel_del(panel_handle);
+        esp_lcd_panel_io_del(io_handle);
+        spi_bus_free(LCD_SPI_HOST);
+        vTaskDelete(NULL);
+        return;
+    }
+    gpio_set_level(LCD_BL_PIN, 1);
 
     ESP_LOGI(TAG, "Display initialized (%dx%d RGB565).", LCD_H_RES, LCD_V_RES);
 
@@ -121,7 +172,10 @@ static void init_i2s_tx(uint32_t sample_rate)
     // wrong ratio shows up as wrong pitch or distortion rather than silence.
     i2s_std_config_t std_cfg = {
         .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(sample_rate),
-        .slot_cfg = I2S_STD_MSB_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
+        // 32-bit slots produce the PCM5102A's expected 64 BCLKs per stereo
+        // frame. The samples are converted to signed 32-bit left-aligned
+        // values in output_block().
+        .slot_cfg = I2S_STD_MSB_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_STEREO),
         .gpio_cfg = {
             .mclk = I2S_MCLK_PIN,
             .bclk = I2S_BCLK_PIN,
@@ -157,7 +211,7 @@ static void init_i2s_tx(uint32_t sample_rate)
 // smaller of the two gains wins, so a single short block comes out as a
 // triangle rather than with a step at the point where one ramp should have
 // started.
-static void shape_output(int16_t *pcm, size_t samples, size_t channels,
+static void shape_output(int32_t *pcm, size_t samples, size_t channels,
                          bool fade_in, bool fade_out)
 {
     if (channels == 0 || samples == 0) return;
@@ -182,12 +236,19 @@ static void shape_output(int16_t *pcm, size_t samples, size_t channels,
         }
 
         for (size_t ch = 0; ch < channels; ch++) {
-            int16_t *s = &pcm[i * channels + ch];
-            // 64-bit intermediate: a full-scale sample times 65536 overflows a
-            // signed 32-bit product by exactly one count.
-            int32_t scaled = (int32_t)(((int64_t)*s * gain) >> (16 + AUDIO_GAIN_SHIFT));
-            *s = (int16_t)scaled;
+            int32_t *s = &pcm[i * channels + ch];
+            // Keep the PCM5102A's 32-bit I2S sample left-aligned while applying
+            // gain and the edge ramps without overflowing.
+            *s = (int32_t)(((int64_t)*s * gain) >> (16 + AUDIO_GAIN_SHIFT));
         }
+    }
+}
+
+static void convert_pcm_for_i2s(const int16_t *pcm, int32_t *i2s_pcm,
+                                size_t samples)
+{
+    for (size_t i = 0; i < samples; i++) {
+        i2s_pcm[i] = (int32_t)pcm[i] << 16;
     }
 }
 
@@ -198,7 +259,7 @@ static void shape_output(int16_t *pcm, size_t samples, size_t channels,
 // stalling playback and freezing the display. In QEMU the I2S peripheral is not
 // modelled, so every write times out - the drop counter is what makes that
 // visible instead of mysterious.
-static void output_block(int16_t *pcm, size_t samples, size_t channels,
+static void output_block(int32_t *pcm, size_t samples, size_t channels,
                          bool fade_in, bool fade_out, uint32_t *dropped_frames)
 {
     shape_output(pcm, samples, channels, fade_in, fade_out);
@@ -273,15 +334,17 @@ void audio_task(void *pvParameters)
         // one-block lookahead the final block has already left at full level by
         // the time read_pcm() reports EOF, so it cannot be faded out.
         int16_t *decode_buf = malloc(pcm_buf_samples * sizeof(int16_t));
-        int16_t *out_buf   = malloc(pcm_buf_samples * sizeof(int16_t));
+        int32_t *out_buf = malloc(pcm_buf_samples * sizeof(int32_t));
+        int32_t *pending_buf = malloc(pcm_buf_samples * sizeof(int32_t));
 
-        if (!decode_buf || !out_buf) {
+        if (!decode_buf || !out_buf || !pending_buf) {
             st.phase = PLAYER_PHASE_ERROR;
             snprintf(st.message, sizeof(st.message), "OUT OF MEMORY");
             player_status_set(&st);
             ESP_LOGE(TAG, "Failed to allocate PCM buffer");
             free(decode_buf);
             free(out_buf);
+            free(pending_buf);
             mp3_decoder_deinit(dec);
             free(dec);
             fclose(f);
@@ -295,7 +358,7 @@ void audio_task(void *pvParameters)
         uint32_t dropped_frames = 0;
         int64_t start_us = esp_timer_get_time();
 
-        size_t pending = 0;               // Interleaved samples waiting in out_buf
+        size_t pending = 0;               // Interleaved samples waiting in pending_buf
         uint32_t pending_channels = 0;
         bool have_pending = false;
         bool wrote_any = false;
@@ -337,14 +400,15 @@ void audio_task(void *pvParameters)
 
             // Getting here means the held-back block was not the last one.
             if (have_pending) {
-                output_block(out_buf, pending, pending_channels,
+                output_block(pending_buf, pending, pending_channels,
                              !wrote_any, false, &dropped_frames);
                 wrote_any = true;
             }
 
-            int16_t *swap = decode_buf;
-            decode_buf = out_buf;
-            out_buf    = swap;
+            convert_pcm_for_i2s(decode_buf, out_buf, (size_t)decoded);
+            int32_t *swap = pending_buf;
+            pending_buf = out_buf;
+            out_buf = swap;
             pending = (size_t)decoded;
             pending_channels = channels;
             have_pending = true;
@@ -352,7 +416,7 @@ void audio_task(void *pvParameters)
 
         if (have_pending) {
             // End of file, so this really is the last block: fade it out.
-            output_block(out_buf, pending, pending_channels,
+            output_block(pending_buf, pending, pending_channels,
                          !wrote_any, true, &dropped_frames);
         }
 
@@ -377,6 +441,7 @@ void audio_task(void *pvParameters)
 
         free(decode_buf);
         free(out_buf);
+        free(pending_buf);
         mp3_decoder_deinit(dec);
     } else {
         st.phase = PLAYER_PHASE_ERROR;

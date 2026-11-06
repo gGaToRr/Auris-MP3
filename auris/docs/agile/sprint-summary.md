@@ -67,7 +67,7 @@ Changes 6 to 14 in the [implementation log](implementation-log.md):
 - Swapped the font for a hand-drawn 8x8 console face, fixing `0` / `O` / `D`.
 - Corrected VBR bitrate and duration via Xing/Info header parsing.
 - Validated the decoder against ffmpeg off-target.
-- Moved to a 16 MB custom partition layout with a build-time FAT storage image.
+- Moved to an 8 MB custom partition layout with a build-time FAT storage image.
 
 ### Acceptance criteria
 
@@ -81,7 +81,7 @@ Changes 6 to 14 in the [implementation log](implementation-log.md):
 - [x] Displayed bitrate and total match the real file, VBR and CBR alike.
 - [x] Decoder output correlates with a reference decoder on channel identity,
       duration and spectrum.
-- [x] Build produces one merged 16 MB image.
+- [x] Build produces one merged 8 MB image.
 - [ ] **Audio is audible on real hardware.** Blocked on a physical ESP32-S3.
 
 ### Definition of done

@@ -1,21 +1,12 @@
-// Self contained UI for the QEMU RGB panel.
-//
-// The esp_lcd_qemu_rgb component exposes its frame buffer (a plain RAM region the
-// guest can write to) plus a refresh call, so the screen is composed by direct
-// pixel writes instead of a chain of esp_lcd_panel_draw_bitmap() calls - each of
-// those blocks until the QEMU display has consumed the previous update, which
-// makes incremental drawing needlessly slow.
-
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
-#include "esp_lcd_qemu_rgb.h"
 
 #include "player_ui.h"
 #include "ui_font7x8.h"
-
-static const char *TAG = "PLAYER_UI";
 
 // RGB565 palette
 #define COLOR_BG        0x0863  // near black navy
@@ -314,21 +305,15 @@ static void draw_footer(const player_status_t *st)
 // ---------------------------------------------------------------------------
 esp_err_t player_ui_init(esp_lcd_panel_handle_t panel, int width, int height)
 {
-    void *fb = NULL;
-    esp_err_t err = esp_lcd_rgb_qemu_get_frame_buffer(panel, &fb);
-    if (err != ESP_OK || fb == NULL) {
-        ESP_LOGE(TAG, "No frame buffer available (0x%x)", err);
-        return err != ESP_OK ? err : ESP_FAIL;
-    }
-
-    s_fb = (uint16_t *)fb;
-    // The panel is configured with bpp = RGB_QEMU_BPP_16, so the frame buffer
-    // holds width * height RGB565 pixels.
+    if (!panel || width <= 0 || height <= 0) return ESP_ERR_INVALID_ARG;
+    size_t framebuffer_size = (size_t)width * (size_t)height * sizeof(*s_fb);
+    s_fb = heap_caps_malloc(framebuffer_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_fb) return ESP_ERR_NO_MEM;
     s_width = width;
     s_height = height;
 
     fill_rect(0, 0, s_width, s_height, COLOR_BG);
-    return esp_lcd_rgb_qemu_refresh(panel);
+    return esp_lcd_panel_draw_bitmap(panel, 0, 0, s_width, s_height, s_fb);
 }
 
 void player_ui_render(esp_lcd_panel_handle_t panel, const player_status_t *st)
@@ -341,5 +326,5 @@ void player_ui_render(esp_lcd_panel_handle_t panel, const player_status_t *st)
     draw_clock_and_progress(st);
     draw_footer(st);
 
-    esp_lcd_rgb_qemu_refresh(panel);
+    esp_lcd_panel_draw_bitmap(panel, 0, 0, s_width, s_height, s_fb);
 }
