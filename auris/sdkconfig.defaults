@@ -1,0 +1,36 @@
+# ── Auris-MP3 — NimBLE secured defaults ──
+
+# Bluetooth ON, NimBLE stack (lighter than Bluedroid)
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+
+# LE Secure Connections Only — refuse Legacy pairing (anti-downgrade)
+CONFIG_BT_NIMBLE_SM_SC=y
+CONFIG_BT_NIMBLE_SM_LEGACY=n
+
+# Bonding + persistence
+CONFIG_BT_NIMBLE_SM_BONDING=y
+CONFIG_BT_NIMBLE_NVS_PERSIST=y
+
+# RPA for privacy (rotate address)
+CONFIG_BT_NIMBLE_ENABLE_RPA=y
+
+# Security manager
+CONFIG_BT_NIMBLE_SECURITY_ENABLE=y
+
+# Man-in-the-middle protection
+CONFIG_BT_NIMBLE_SM_MITM=y
+
+# BLE 5.0 features (ESP32-S3 supports it)
+CONFIG_BT_NIMBLE_50_FEATURE_SUPPORT=y
+
+# Max connections (keep it lean)
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=3
+
+# Scan + central role
+CONFIG_BT_NIMBLE_ROLE_CENTRAL=y
+CONFIG_BT_NIMBLE_ROLE_OBSERVER=y
+
+# Peripheral role (for later — advertising as audio device)
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y
+CONFIG_BT_NIMBLE_ROLE_BROADCASTER=y
