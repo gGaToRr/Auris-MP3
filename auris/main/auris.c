@@ -21,26 +21,27 @@ static const char *TAG = "AURIS_MAIN";
 static wl_handle_t s_wl_handle = WL_INVALID_HANDLE;
 
 // Display Configuration
-#define LCD_H_RES 320
-#define LCD_V_RES 480
+// The module is mounted in landscape: 480 px wide by 320 px tall.
+#define LCD_H_RES 480
+#define LCD_V_RES 320
 
-#define LCD_SPI_HOST    SPI2_HOST
-#define LCD_SCLK_PIN    GPIO_NUM_12
-#define LCD_MOSI_PIN    GPIO_NUM_11
-#define LCD_CS_PIN      GPIO_NUM_10
-#define LCD_DC_PIN      GPIO_NUM_9
-#define LCD_RST_PIN     GPIO_NUM_6
-#define LCD_BL_PIN      GPIO_NUM_7
+#define LCD_SPI_HOST SPI2_HOST
+#define LCD_SCLK_PIN GPIO_NUM_12
+#define LCD_MOSI_PIN GPIO_NUM_11
+#define LCD_CS_PIN GPIO_NUM_10
+#define LCD_DC_PIN GPIO_NUM_9
+#define LCD_RST_PIN GPIO_NUM_6
+#define LCD_BL_PIN GPIO_NUM_7
 
 // I2S Hardware Output Pins for ESP32-S3
 //
 // MCLK/BCLK/WS/DOUT is the standard I2S pin group. The PCM5102A accepts the
 // 32-bit stereo I2S frame used below, with the 16-bit decoded samples
 // left-aligned in each slot.
-#define I2S_MCLK_PIN   GPIO_NUM_8
-#define I2S_BCLK_PIN   GPIO_NUM_16
-#define I2S_WS_PIN     GPIO_NUM_17
-#define I2S_DOUT_PIN   GPIO_NUM_18
+#define I2S_MCLK_PIN GPIO_NUM_8
+#define I2S_BCLK_PIN GPIO_NUM_16
+#define I2S_WS_PIN GPIO_NUM_17
+#define I2S_DOUT_PIN GPIO_NUM_18
 
 // Audio Task Stack Size
 //
@@ -59,7 +60,7 @@ static wl_handle_t s_wl_handle = WL_INVALID_HANDLE;
 // 32 KB keeps a comfortable margin (45% headroom) over the measured peak.
 // Re-measure if minimp3.h is updated: the high-water mark printed at the end of
 // audio_task() must stay well below 0.
-#define AUDIO_TASK_STACK_SIZE (32 * 1024)
+#define AUDIO_TASK_STACK_SIZE (36 * 1024)
 
 static i2s_chan_handle_t tx_handle = NULL;
 
@@ -68,11 +69,11 @@ void mount_virtual_storage(void)
     const esp_vfs_fat_mount_config_t mount_config = {
         .max_files = 4,
         .format_if_mount_failed = false,
-        .allocation_unit_size = CONFIG_WL_SECTOR_SIZE
-    };
+        .allocation_unit_size = CONFIG_WL_SECTOR_SIZE};
 
     esp_err_t err = esp_vfs_fat_spiflash_mount_rw_wl("/sdcard", "storage", &mount_config, &s_wl_handle);
-    if (err != ESP_OK) {
+    if (err != ESP_OK)
+    {
         ESP_LOGE("STORAGE", "Failed to mount FATFS (0x%x)", err);
         return;
     }
@@ -100,6 +101,9 @@ void display_task(void *pvParameters)
         .miso_io_num = -1,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
+        // The ILI9488 driver expands each RGB565 pixel to three RGB666 bytes
+        // before sending it over SPI. One 40-line chunk is therefore 3 bytes
+        // per pixel, not 2.
         .max_transfer_sz = LCD_H_RES * 40 * 3,
     };
     ESP_ERROR_CHECK(spi_bus_initialize(LCD_SPI_HOST, &bus_config, SPI_DMA_CH_AUTO));
@@ -121,15 +125,28 @@ void display_task(void *pvParameters)
     esp_lcd_panel_dev_config_t panel_config = {
         .reset_gpio_num = LCD_RST_PIN,
         .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_BGR,
+        // ILI9488 only supports 18-bit RGB666 over SPI. The driver accepts
+        // RGB565 input and converts it to RGB666 using the buffer below.
         .bits_per_pixel = 18,
     };
 
+    // The third argument is the number of pixels the driver may convert per
+    // draw_bitmap() call. The UI flushes 40 lines at a time.
     ESP_ERROR_CHECK(esp_lcd_new_panel_ili9488(io_handle, &panel_config,
-                                              LCD_H_RES * 40 * sizeof(uint16_t),
-                                              &panel_handle));
+                                              LCD_H_RES * 40, &panel_handle));
+    ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle));
+    // The ILI9488 needs at least 120 ms after reset before commands are sent.
+    vTaskDelay(pdMS_TO_TICKS(120));
     ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
+    // Rotation 1 for the ILI9488 is MADCTL = MV | BGR (0x28). The driver
+    // defaults to 0x48 (MX | BGR), so exchange rows/columns and clear MX to
+    // expose a 480x320 landscape coordinate space to the UI.
+    ESP_ERROR_CHECK(esp_lcd_panel_swap_xy(panel_handle, true));
+    ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel_handle, true, false));
+    ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle, true));
     esp_err_t ui_err = player_ui_init(panel_handle, LCD_H_RES, LCD_V_RES);
-    if (ui_err != ESP_OK) {
+    if (ui_err != ESP_OK)
+    {
         ESP_LOGE(TAG, "Failed to allocate display framebuffer: %s", esp_err_to_name(ui_err));
         esp_lcd_panel_del(panel_handle);
         esp_lcd_panel_io_del(io_handle);
@@ -146,13 +163,23 @@ void display_task(void *pvParameters)
     player_status_t shown;
     player_status_t latest;
     bool have_shown = false;
+    int loop_count = 0;
 
-    while (1) {
+    while (1)
+    {
         player_status_get(&latest);
-        if (!have_shown || memcmp(&latest, &shown, sizeof(latest)) != 0) {
+        if (!have_shown || memcmp(&latest, &shown, sizeof(latest)) != 0)
+        {
             player_ui_render(panel_handle, &latest);
             shown = latest;
             have_shown = true;
+        }
+        if (++loop_count % 10 == 0)
+        {
+            ESP_LOGI(TAG, "Status [%s]: %lu/%lu s",
+                     latest.message,
+                     (unsigned long)(latest.sample_rate ? latest.samples_played / latest.sample_rate : 0),
+                     (unsigned long)latest.total_seconds);
         }
         vTaskDelay(pdMS_TO_TICKS(200));
     }
@@ -179,9 +206,9 @@ static void init_i2s_tx(uint32_t sample_rate)
         .gpio_cfg = {
             .mclk = I2S_MCLK_PIN,
             .bclk = I2S_BCLK_PIN,
-            .ws   = I2S_WS_PIN,
+            .ws = I2S_WS_PIN,
             .dout = I2S_DOUT_PIN,
-            .din  = I2S_GPIO_UNUSED,
+            .din = I2S_GPIO_UNUSED,
         },
     };
 
@@ -214,28 +241,36 @@ static void init_i2s_tx(uint32_t sample_rate)
 static void shape_output(int32_t *pcm, size_t samples, size_t channels,
                          bool fade_in, bool fade_out)
 {
-    if (channels == 0 || samples == 0) return;
+    if (channels == 0 || samples == 0)
+        return;
 
     size_t frames = samples / channels;
     size_t ramp = AUDIO_FADE_SAMPLES;
-    if (ramp > frames) ramp = frames;     // shorter block: ramp across all of it
+    if (ramp > frames)
+        ramp = frames; // shorter block: ramp across all of it
 
-    for (size_t i = 0; i < frames; i++) {
+    for (size_t i = 0; i < frames; i++)
+    {
         // Linear gain in 16.16 fixed point, 65536 == 1.0.
         uint32_t gain = 65536u;
 
         // Both ramps are scaled so the boundary sample is exactly zero, not
         // 1/ramp of full scale: silencing the discontinuity is the whole point.
-        if (fade_in && i < ramp) {
+        if (fade_in && i < ramp)
+        {
             uint32_t g = (uint32_t)(((uint64_t)i * 65536u) / ramp);
-            if (g < gain) gain = g;
+            if (g < gain)
+                gain = g;
         }
-        if (fade_out && frames - i <= ramp) {
+        if (fade_out && frames - i <= ramp)
+        {
             uint32_t g = (uint32_t)(((uint64_t)(frames - 1 - i) * 65536u) / ramp);
-            if (g < gain) gain = g;
+            if (g < gain)
+                gain = g;
         }
 
-        for (size_t ch = 0; ch < channels; ch++) {
+        for (size_t ch = 0; ch < channels; ch++)
+        {
             int32_t *s = &pcm[i * channels + ch];
             // Keep the PCM5102A's 32-bit I2S sample left-aligned while applying
             // gain and the edge ramps without overflowing.
@@ -247,7 +282,8 @@ static void shape_output(int32_t *pcm, size_t samples, size_t channels,
 static void convert_pcm_for_i2s(const int16_t *pcm, int32_t *i2s_pcm,
                                 size_t samples)
 {
-    for (size_t i = 0; i < samples; i++) {
+    for (size_t i = 0; i < samples; i++)
+    {
         i2s_pcm[i] = (int32_t)pcm[i] << 16;
     }
 }
@@ -265,13 +301,17 @@ static void output_block(int32_t *pcm, size_t samples, size_t channels,
     shape_output(pcm, samples, channels, fade_in, fade_out);
 
     size_t bytes_written = 0;
-    esp_err_t err = i2s_channel_write(tx_handle, pcm,
-                                      samples * sizeof(int16_t),
-                                      &bytes_written,
-                                      pdMS_TO_TICKS(1000));
-    if (err != ESP_OK) {
+    esp_err_t err = i2s_channel_write(
+        tx_handle,
+        pcm,
+        samples * sizeof(int32_t),
+        &bytes_written,
+        pdMS_TO_TICKS(1000));
+    if (err != ESP_OK)
+    {
         (*dropped_frames)++;
-        if (*dropped_frames == 1 || *dropped_frames % 100 == 0) {
+        if (*dropped_frames == 1 || *dropped_frames % 100 == 0)
+        {
             ESP_LOGW(TAG, "I2S write failed (0x%x), %lu frame(s) dropped",
                      err, (unsigned long)*dropped_frames);
         }
@@ -294,7 +334,8 @@ void audio_task(void *pvParameters)
 
     FILE *f = fopen(test_file, "rb");
 
-    if (!f) {
+    if (!f)
+    {
         st.phase = PLAYER_PHASE_ERROR;
         snprintf(st.message, sizeof(st.message), "FILE NOT FOUND");
         player_status_set(&st);
@@ -304,9 +345,11 @@ void audio_task(void *pvParameters)
     }
 
     // File size drives the progress bar and the duration estimate.
-    if (fseek(f, 0, SEEK_END) == 0) {
+    if (fseek(f, 0, SEEK_END) == 0)
+    {
         long file_size = ftell(f);
-        if (file_size > 0) {
+        if (file_size > 0)
+        {
             st.file_size = (uint32_t)file_size;
         }
         rewind(f);
@@ -317,7 +360,8 @@ void audio_task(void *pvParameters)
 
     // Allocate decoder context on the HEAP to protect task stack
     mp3_decoder_t *dec = calloc(1, sizeof(mp3_decoder_t));
-    if (!dec) {
+    if (!dec)
+    {
         st.phase = PLAYER_PHASE_ERROR;
         snprintf(st.message, sizeof(st.message), "OUT OF MEMORY");
         player_status_set(&st);
@@ -327,7 +371,8 @@ void audio_task(void *pvParameters)
         return;
     }
 
-    if (mp3_decoder_init(dec, f)) {
+    if (mp3_decoder_init(dec, f))
+    {
         size_t pcm_buf_samples = MP3_MAX_SAMPLES_PER_FRAME;
         // Two blocks: one is decoded into, the previous one is held back so the
         // end of the file is known before the last block is sent. Without that
@@ -337,7 +382,8 @@ void audio_task(void *pvParameters)
         int32_t *out_buf = malloc(pcm_buf_samples * sizeof(int32_t));
         int32_t *pending_buf = malloc(pcm_buf_samples * sizeof(int32_t));
 
-        if (!decode_buf || !out_buf || !pending_buf) {
+        if (!decode_buf || !out_buf || !pending_buf)
+        {
             st.phase = PLAYER_PHASE_ERROR;
             snprintf(st.message, sizeof(st.message), "OUT OF MEMORY");
             player_status_set(&st);
@@ -358,29 +404,33 @@ void audio_task(void *pvParameters)
         uint32_t dropped_frames = 0;
         int64_t start_us = esp_timer_get_time();
 
-        size_t pending = 0;               // Interleaved samples waiting in pending_buf
+        size_t pending = 0; // Interleaved samples waiting in pending_buf
         uint32_t pending_channels = 0;
         bool have_pending = false;
         bool wrote_any = false;
 
-        while (1) {
+        while (1)
+        {
             int decoded = mp3_decoder_read_pcm(dec, decode_buf, pcm_buf_samples);
-            if (decoded <= 0) break; // Playback finished or error
+            if (decoded <= 0)
+                break; // Playback finished or error
 
-            if (!i2s_initialized) {
+            if (!i2s_initialized)
+            {
                 init_i2s_tx(dec->info.sample_rate);
                 i2s_initialized = true;
             }
 
-            if (!info_published) {
-                st.sample_rate     = dec->info.sample_rate;
-                st.bitrate_kbps    = dec->info.bitrate_kbps;
-                st.channels        = dec->info.channels;
+            if (!info_published)
+            {
+                st.sample_rate = dec->info.sample_rate;
+                st.bitrate_kbps = dec->info.bitrate_kbps;
+                st.channels = dec->info.channels;
                 st.bits_per_sample = dec->info.bits_per_sample;
-                st.layer           = dec->info.layer;
-                st.phase           = PLAYER_PHASE_PLAYING;
+                st.layer = dec->info.layer;
+                st.phase = PLAYER_PHASE_PLAYING;
                 snprintf(st.message, sizeof(st.message), "PLAYING");
-                info_published     = true;
+                info_published = true;
             }
 
             uint32_t channels = dec->info.channels ? dec->info.channels : 1;
@@ -389,17 +439,19 @@ void audio_task(void *pvParameters)
             // Publish once per displayed second instead of once per frame to
             // keep the status copy (and the repaint) cheap.
             uint32_t second = st.sample_rate ? st.samples_played / st.sample_rate : 0;
-            if (second != published_second) {
-                st.file_pos       = mp3_decoder_position(dec);
-                st.bitrate_kbps   = dec->info.bitrate_kbps;     // running average
-                st.total_seconds  = mp3_decoder_total_seconds(dec);
-                st.total_exact    = mp3_decoder_total_is_exact(dec);
+            if (second != published_second)
+            {
+                st.file_pos = mp3_decoder_position(dec);
+                st.bitrate_kbps = dec->info.bitrate_kbps; // running average
+                st.total_seconds = mp3_decoder_total_seconds(dec);
+                st.total_exact = mp3_decoder_total_is_exact(dec);
                 player_status_set(&st);
-                published_second  = second;
+                published_second = second;
             }
 
             // Getting here means the held-back block was not the last one.
-            if (have_pending) {
+            if (have_pending)
+            {
                 output_block(pending_buf, pending, pending_channels,
                              !wrote_any, false, &dropped_frames);
                 wrote_any = true;
@@ -414,7 +466,8 @@ void audio_task(void *pvParameters)
             have_pending = true;
         }
 
-        if (have_pending) {
+        if (have_pending)
+        {
             // End of file, so this really is the last block: fade it out.
             output_block(pending_buf, pending, pending_channels,
                          !wrote_any, true, &dropped_frames);
@@ -443,7 +496,9 @@ void audio_task(void *pvParameters)
         free(out_buf);
         free(pending_buf);
         mp3_decoder_deinit(dec);
-    } else {
+    }
+    else
+    {
         st.phase = PLAYER_PHASE_ERROR;
         snprintf(st.message, sizeof(st.message), "DECODER INIT FAILED");
         player_status_set(&st);
@@ -479,12 +534,12 @@ void app_main(void)
     if (xTaskCreatePinnedToCore(
             display_task,
             "gui_task",
-            4096,
+            8192,
             NULL,
             2,
             NULL,
-            0
-        ) != pdPASS) {
+            0) != pdPASS)
+    {
         ESP_LOGE(TAG, "Failed to create display task");
     }
 
@@ -497,8 +552,8 @@ void app_main(void)
             NULL,
             5,
             NULL,
-            1
-        ) != pdPASS) {
+            1) != pdPASS)
+    {
         ESP_LOGE(TAG, "Failed to create audio task (stack size %d bytes)",
                  (int)AUDIO_TASK_STACK_SIZE);
     }

@@ -20,9 +20,9 @@
 #define COLOR_WARN      0xFFE0  // yellow
 #define COLOR_OK        0x07E0  // green
 
-// Layout
+// Layout for a 480x320 landscape panel
 #define MARGIN       20
-#define HEADER_H     52
+#define HEADER_H     46
 #define ACCENT_H     2
 
 static uint16_t *s_fb;
@@ -184,7 +184,7 @@ static void draw_header(const player_status_t *st)
     fill_rect(0, HEADER_H - ACCENT_H, s_width, ACCENT_H, COLOR_ACCENT);
 
     draw_text(MARGIN, 6, "AURIS", COLOR_TEXT, 4);
-    draw_text_right(s_width - MARGIN, 16, phase_text(st->phase),
+    draw_text_right(s_width - MARGIN, 13, phase_text(st->phase),
                     phase_color(st->phase), 2);
 }
 
@@ -196,11 +196,11 @@ static void draw_track_info(const player_status_t *st)
 
     char name[24];
     fit_text(name, sizeof(name), base, usable, 4);
-    draw_text(MARGIN, 70, name, COLOR_TEXT, 4);
+    draw_text(MARGIN, 56, name, COLOR_TEXT, 4);
 
     char path[40];
     fit_text(path, sizeof(path), st->path, usable, 2);
-    draw_text(MARGIN, 120, path, COLOR_DIM, 2);
+    draw_text(MARGIN, 94, path, COLOR_DIM, 2);
 
     if (st->sample_rate == 0) return;   // nothing decoded yet
 
@@ -208,7 +208,7 @@ static void draw_track_info(const player_status_t *st)
     snprintf(codec, sizeof(codec), "MPEG-%u LAYER %u",
              (unsigned)mpeg_version_from_rate(st->sample_rate),
              (unsigned)st->layer);
-    draw_text(MARGIN, 152, codec, COLOR_ACCENT, 3);
+    draw_text(MARGIN, 118, codec, COLOR_ACCENT, 3);
 
     char format[40];
     snprintf(format, sizeof(format), "%lu.%01lu KHZ  %lu KBPS  %s",
@@ -216,7 +216,7 @@ static void draw_track_info(const player_status_t *st)
              (unsigned long)((st->sample_rate / 100) % 10),
              (unsigned long)st->bitrate_kbps,
              st->channels > 1 ? "STEREO" : "MONO");
-    draw_text(MARGIN, 192, format, channels_color(st->channels), 2);
+    draw_text(MARGIN, 148, format, channels_color(st->channels), 2);
 }
 
 static uint32_t progress_percent(const player_status_t *st)
@@ -243,12 +243,12 @@ static void draw_clock_and_progress(const player_status_t *st)
     } else {
         format_time(clock, sizeof(clock), elapsed);
     }
-    draw_text_centered(236, clock, COLOR_TEXT, 6);
+    draw_text_centered(170, clock, COLOR_TEXT, 6);
 
     const int bar_x = MARGIN;
-    const int bar_y = 320;
+    const int bar_y = 228;
     const int bar_w = s_width - 2 * MARGIN;
-    const int bar_h = 18;
+    const int bar_h = 16;
 
     fill_rect(bar_x, bar_y, bar_w, bar_h, COLOR_BAR_BG);
     int fill_w = (int)((uint32_t)(bar_w - 4) * progress_percent(st) / 100u);
@@ -271,11 +271,11 @@ static void draw_clock_and_progress(const player_status_t *st)
         snprintf(times, sizeof(times), "%s / %s%s", clock,
                  st->total_exact ? "" : "~", total);
     }
-    draw_text(MARGIN, 350, times, COLOR_DIM, 3);
+    draw_text(MARGIN, 252, times, COLOR_DIM, 3);
 
     char percent[8];
     snprintf(percent, sizeof(percent), "%lu%%", (unsigned long)progress_percent(st));
-    draw_text_right(s_width - MARGIN, 350, percent, COLOR_BAR_FILL, 3);
+    draw_text_right(s_width - MARGIN, 252, percent, COLOR_BAR_FILL, 3);
 }
 
 static void draw_footer(const player_status_t *st)
@@ -285,7 +285,7 @@ static void draw_footer(const player_status_t *st)
     if (st->message[0]) {
         char message[40];
         fit_text(message, sizeof(message), st->message, usable, 2);
-        draw_text_centered(398, message, phase_color(st->phase), 2);
+        draw_text_centered(278, message, phase_color(st->phase), 2);
     }
 
     char left[32];
@@ -296,13 +296,31 @@ static void draw_footer(const player_status_t *st)
     } else {
         snprintf(left, sizeof(left), "NO FILE");
     }
-    draw_text(MARGIN, 444, left, COLOR_DIM, 2);
-    draw_text_right(s_width - MARGIN, 444, "I2S", COLOR_DIM, 2);
+    draw_text(MARGIN, 298, left, COLOR_DIM, 2);
+    draw_text_right(s_width - MARGIN, 298, "I2S", COLOR_DIM, 2);
 }
 
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+static esp_err_t flush_framebuffer(esp_lcd_panel_handle_t panel)
+{
+    const int lines_per_chunk = 40;
+
+    // The ILI9488 driver takes native RGB565 pixels and converts them to the
+    // RGB666 byte stream that the ILI9488 requires in SPI mode. Do not
+    // byte-swap here: the driver handles the wire format itself.
+    for (int y = 0; y < s_height; y += lines_per_chunk) {
+        int h = (y + lines_per_chunk <= s_height) ? lines_per_chunk : (s_height - y);
+        esp_err_t err = esp_lcd_panel_draw_bitmap(panel, 0, y, s_width, y + h,
+                                                  &s_fb[y * s_width]);
+        if (err != ESP_OK) {
+            return err;
+        }
+    }
+    return ESP_OK;
+}
+
 esp_err_t player_ui_init(esp_lcd_panel_handle_t panel, int width, int height)
 {
     if (!panel || width <= 0 || height <= 0) return ESP_ERR_INVALID_ARG;
@@ -313,7 +331,7 @@ esp_err_t player_ui_init(esp_lcd_panel_handle_t panel, int width, int height)
     s_height = height;
 
     fill_rect(0, 0, s_width, s_height, COLOR_BG);
-    return esp_lcd_panel_draw_bitmap(panel, 0, 0, s_width, s_height, s_fb);
+    return flush_framebuffer(panel);
 }
 
 void player_ui_render(esp_lcd_panel_handle_t panel, const player_status_t *st)
@@ -326,5 +344,5 @@ void player_ui_render(esp_lcd_panel_handle_t panel, const player_status_t *st)
     draw_clock_and_progress(st);
     draw_footer(st);
 
-    esp_lcd_panel_draw_bitmap(panel, 0, 0, s_width, s_height, s_fb);
+    flush_framebuffer(panel);
 }
