@@ -455,10 +455,102 @@ the FAT image at build time is what lets the whole thing be merged into one
 
 ---
 
+# Sprint 3 — Hardware bring-up
+
+## Change 15 — The real panel was an ILI9488, and the UI had to be landscape
+
+### Context
+The first on-target boot showed roughly five repeated vertical colour stripes
+across the whole panel instead of the player UI. The working tree had been
+switched to `espressif/esp_lcd_st7796` with `bits_per_pixel = 16` during the
+previous debugging pass.
+
+The module is a LAFVIN 3.5" 480x320 SPI TFT (Amazon ASIN `B0CQ86T4S9`,
+LCDWiki MSP3520), whose listing and documentation identify the controller as an
+**ILI9488**, not an ST7796. The ILI9488 cannot accept RGB565 over SPI: its SPI
+interface requires 18-bit RGB666. Feeding it 2-byte pixels from the ST7796 path
+made the controller interpret the stream as 3-byte pixels, which is exactly what
+produced the repeating vertical stripes.
+
+Once the image was valid, a second problem appeared: the UI had been laid out
+for a 320x480 portrait panel, while the module is mounted as 480x320 landscape,
+so the whole screen was rotated 90 degrees.
+
+### Hardware
+- Panel: LAFVIN 3.5" 480x320 SPI TFT, ILI9488 controller, ASIN `B0CQ86T4S9`
+  (LCDWiki MSP3520).
+- SPI wiring: SCLK GPIO12, MOSI GPIO11, CS GPIO10, DC GPIO9, RST GPIO6,
+  backlight GPIO7.
+
+### Files changed
+- [../../main/auris.c](../../main/auris.c)
+- [../../main/player_ui.c](../../main/player_ui.c)
+- [../../sdkconfig](../../sdkconfig)
+- [../../main/idf_component.yml](../../main/idf_component.yml)
+
+### What changed
+- Restored `atanisoft/esp_lcd_ili9488` with `.bits_per_pixel = 18`; the driver
+  accepts native RGB565 pixels and expands them to RGB666 before transmission.
+- Removed the now-unused `espressif/esp_lcd_st7796` dependency.
+- Removed the manual big-endian byte swap from `player_ui.c`; the driver owns the
+  wire format.
+- Corrected the third argument of `esp_lcd_new_panel_ili9488()` from bytes to
+  pixels (`LCD_H_RES * 40`) and set `max_transfer_sz` to three bytes per pixel.
+- Added an explicit panel reset followed by a 120 ms delay before
+  `esp_lcd_panel_init()`.
+- Changed the logical resolution to 480x320 and selected rotation 1
+  (`MADCTL = MV | BGR`, 0x28) with `esp_lcd_panel_swap_xy(true)` plus
+  `esp_lcd_panel_mirror(true, false)`.
+- Reflowed every UI section for the 320 px height and kept the 40-line chunked
+  framebuffer flush.
+- Enabled PSRAM (the framebuffer lives there) and the USB Serial/JTAG console
+  (flashing and logs now use `/dev/ttyACM0`).
+- Included the pending working-tree fixes: full 32-bit samples to
+  `i2s_channel_write()`, larger audio and display task stacks, and periodic
+  playback status logging.
+
+### Why this mattered
+This is the difference between a display pipeline that is theoretically correct
+and one that is correct on the actual panel. The ILI9488's RGB666 requirement is
+easy to miss because the controller has a 16-bit mode for parallel interfaces;
+over SPI that mode is not usable. Letting the driver perform the RGB565 to RGB666
+conversion also removes a class of endianness bugs from the application.
+
+The rotation change matters for the same reason: the panel's native scan
+direction is portrait, but the product is mounted landscape. Rotation 1 gives the
+UI a 480x320 coordinate space without any software image rotation.
+
+### Verification
+- `idf.py build` completes cleanly; the application image is 85% clear of the
+  2 MB app partition.
+- Flashed over USB Serial/JTAG to `/dev/ttyACM0`.
+- Boot log:
+  ```
+  AURIS_MAIN: Initializing ILI9488 SPI display...
+  ili9488: Initialization complete
+  AURIS_MAIN: Display initialized (480x320 RGB565).
+  AURIS_MAIN: Status [PLAYING]: 3/58 s
+  ```
+- Visual check on the target board: UI is horizontal, upright, readable and free
+  of the repeated-line artifact.
+- Audio output is still unverified; the PCM5102A/earbud chain has not been
+  listened to yet.
+
+### Agile traceability
+- Epic: Display validation / Hardware bring-up
+- Story: Render the player UI correctly on the real panel
+- Acceptance: The ILI9488 initializes over SPI, the 480x320 landscape UI is
+  upright and readable, and the stripe artifact is gone
+
+---
+
 ## Overall status
 
 ### Done
-- MP3 decoding via minimp3, output over I2S, file-info UI on a 480x480 panel
+- MP3 decoding via minimp3, output over I2S, file-info UI on a 480x320
+  landscape panel
+- Display hardware bring-up: ILI9488 identified, 18-bit RGB666 SPI path
+  restored, rotation 1 configured and the UI verified on the target board
 - Audio task stack overflow diagnosed from first principles and fixed
 - I2S writes made non-blocking and instrumented
 - Master clock routed for the PCM5102A
@@ -466,16 +558,20 @@ the FAT image at build time is what lets the whole thing be merged into one
 - Pixel console font with unambiguous `0` / `O` / `D`
 - Correct VBR bitrate and duration reporting
 - Decode path validated against ffmpeg off-target
-- Build produces one merged 16 MB image (87% of the app partition free)
+- Build produces one merged 16 MB image (85% of the app partition free)
 
 ### In progress
-- Hardware bring-up on a real ESP32-S3 with a PCM5102A and earbuds
+- Hardware audio bring-up on a real ESP32-S3 with a PCM5102A and earbuds. The
+  display half of the bring-up is complete.
 
 ### Risks / follow-up
 - **Audio has never been heard.** QEMU models no I2S peripheral for the
   ESP32-S3, so the data path is verified off-target and the clock pin is
   unverified. MCLK on GPIO8 was chosen from the IOMUX group but could not be
   confirmed against a local datasheet.
+- **The display path is validated for ILI9488 modules only.** An ST7796 panel,
+  or an ILI9488 mounted in a different orientation, needs a driver or rotation
+  change.
 - **The PCM5102A is a line-out DAC**, specified for 10 kΩ and above. Into
   16-32 Ω earbuds it will be quiet and thin unless the module carries a
   headphone buffer. This is a hardware selection question, not a firmware one.

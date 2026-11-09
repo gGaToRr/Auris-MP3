@@ -6,8 +6,9 @@ This folder records the work completed for the Auris project in an Agile-friendl
 
 Sprint 1 validated the ESP32 display path with a colour-bar test pattern.
 Sprint 2 replaced it with an MP3 player: decode a file, drive an external I2S
-DAC, and show what is playing. The player is complete and verified in
-simulation; it has not yet been heard on real hardware.
+DAC, and show what is playing. Sprint 3 brought the display up on the real
+ESP32-S3: the ILI9488 panel now renders the player UI in landscape at 480x320.
+Audio output has not yet been heard on real hardware.
 
 ## Documentation set
 
@@ -16,11 +17,11 @@ simulation; it has not yet been heard on real hardware.
 
 ## Project status
 
-- Status: In progress — software complete, blocked on hardware bring-up
+- Status: In progress — display validated on target; audio output still unverified
 - Current sprint focus: PCM5102A and earbud output on a real ESP32-S3
-- Primary evidence: playback runs in QEMU with zero panics, the panel reads back
-  with no unmatched glyphs, and the displayed bitrate and duration match ffprobe
-  for the test file
+- Primary evidence: on-target ILI9488 boot log and a confirmed 480x320 landscape
+  UI, plus QEMU playback with zero panics and decoder output validated against
+  ffmpeg
 
 ## Agile view
 
@@ -28,12 +29,12 @@ simulation; it has not yet been heard on real hardware.
 
 | Epic | State |
 | --- | --- |
-| Display validation | Done (sprint 1) |
+| Display validation | Done — ILI9488 480x320 landscape verified on target |
 | Build and environment readiness | Done |
 | Playback stability | Done |
 | Playback visibility | Done |
 | Hardware audio output | In progress — firmware ready, hardware unverified |
-| Verification | Done off-target, pending an on-target audio check |
+| Verification | Display verified on target; audio check pending |
 
 ### User stories
 
@@ -77,11 +78,14 @@ Display:
   consistent.
 - The displayed bitrate matches the file's average and the displayed total
   matches its real duration, for VBR and CBR files alike.
+- The panel is driven as an ILI9488 over SPI in its required 18-bit RGB666 mode.
+- The UI is rendered in the mounted 480x320 landscape orientation.
 
 Verification:
 
 - Decoder output correlates with a reference decoder on channel identity,
   duration and spectrum.
+- The display shows the player UI correctly on the target board. **Met.**
 - Sound comes out of the earbuds on the target board. **Not yet met.**
 
 ## Known risks
@@ -89,6 +93,10 @@ Verification:
 - **Audio has never been heard.** QEMU models no I2S peripheral for the
   ESP32-S3, so the data path is verified off-target and the clock pin is
   unverified.
+- **The display path is validated for ILI9488 modules only.** The firmware uses
+  the ILI9488 18-bit RGB666 SPI path and landscape rotation 1. An ST7796 panel,
+  or the same panel mounted in a different orientation, needs a driver or
+  rotation change.
 - **The PCM5102A is a line-out DAC**, specified for 10 kΩ and above. Into
   16-32 Ω earbuds it will be quiet and thin unless the module carries a
   headphone buffer.

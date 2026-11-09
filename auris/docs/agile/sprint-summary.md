@@ -63,7 +63,8 @@ Changes 6 to 14 in the [implementation log](implementation-log.md):
 - Made I2S writes non-blocking with a drop counter.
 - Enabled the PCM5102A master clock on GPIO8.
 - Added output gain and 20 ms fades at both ends, with a one-block lookahead.
-- Replaced the colour bars with a full file-info UI on a 480x480 panel.
+- Replaced the colour bars with a full file-info UI on a 480x480 panel
+  (later reflowed to 480x320 landscape in change 15).
 - Swapped the font for a hand-drawn 8x8 console face, fixing `0` / `O` / `D`.
 - Corrected VBR bitrate and duration via Xing/Info header parsing.
 - Validated the decoder against ffmpeg off-target.
@@ -93,6 +94,8 @@ criterion is the one that is not.
 ### Current status
 
 - Status: Complete in simulation, blocked on hardware bring-up
+- Update after sprint 3: the display half of the bring-up is now validated on
+  target; audio remains the only open hardware question
 - Confidence: High for the software, unknown for the audio
 - Remaining risk: nothing has been listened to; QEMU models no I2S peripheral
   for the ESP32-S3, so the clock pin and the analogue chain are both unverified
@@ -129,16 +132,85 @@ criterion is the one that is not.
 - The mono upmix path.
 - Any refactor of the audio path beyond what the volume and fade work required.
 
+---
+
+## Sprint 3 — Display hardware bring-up
+
+### Sprint goal
+
+Make the player UI render correctly on the real ESP32-S3 and its ILI9488 panel,
+closing the display half of the hardware bring-up.
+
+### Completed work
+
+Change 15 in the [implementation log](implementation-log.md):
+
+- Identified the panel as a LAFVIN 3.5" 480x320 SPI ILI9488 (ASIN `B0CQ86T4S9`,
+  LCDWiki MSP3520).
+- Diagnosed the repeated vertical stripes as an ILI9488 being driven by the
+  ST7796 RGB565 path; the ILI9488 requires 18-bit RGB666 over SPI.
+- Restored `atanisoft/esp_lcd_ili9488` at 18 bpp and removed the manual byte
+  swap.
+- Added an explicit reset plus a 120 ms delay, and corrected the driver buffer
+  size from bytes to pixels.
+- Selected landscape rotation 1 (`MADCTL = MV | BGR`, 0x28) and reflowed the UI
+  for 480x320.
+- Enabled PSRAM for the framebuffer and the USB Serial/JTAG console for flashing
+  and logs.
+- Folded in the pending 32-bit I2S sample-size fix, task stack increases and
+  playback status logging.
+
+### Acceptance criteria
+
+- [x] Firmware boots with the ILI9488 driver and no display errors.
+- [x] UI renders horizontally and upright on the real 480x320 panel.
+- [x] No vertical stripes or repeated image artifacts.
+- [x] Playback status continues to update on screen.
+- [ ] Audio is audible on real hardware (carried over to the audio bring-up).
+
+### Definition of done
+
+The sprint is complete when the UI is correct on the target panel. Audio output
+is a separate hardware bring-up item and is not part of this sprint's scope.
+
+### Current status
+
+- Status: Display complete on target; audio bring-up remains
+- Confidence: High for the display, unknown for the audio
+- Remaining risk: the PCM5102A/earbud chain is still unheard, and the display
+  configuration is specific to ILI9488 modules in the current mounting
+
+### Verification evidence
+
+| Check | Result |
+| --- | --- |
+| Build | Clean; app image uses 15% of the 2 MB app partition |
+| Flash | USB Serial/JTAG on `/dev/ttyACM0` |
+| Boot log | `ili9488: Initialization complete`, `Display initialized (480x320 RGB565)` |
+| Visual check | UI horizontal, upright, readable, no stripe artifact |
+| Playback display | Status log advances (`3/58 s`, `5/58 s`, ...) |
+| Audio output | Not yet verified on hardware |
+
+### Next sprint recommendations
+
+1. Bring up the PCM5102A: scope BCLK, WS, MCLK and DOUT before fitting earbuds.
+2. Confirm MCLK on GPIO8 against the ESP32-S3 datasheet and check the module's
+   MODE strapping against the 256 × fS ratio.
+3. Listen to the test track end to end, including the start/end fades.
+4. Decide the font licensing question (GPL-2) before any distribution.
+5. Move the host verification harnesses from `/tmp/opencode/` into
+   `auris/tools/`.
+
 ### Agile metrics
 
-| Metric | Sprint 1 | Sprint 2 |
-| --- | --- | --- |
-| Story count | 4 | 9 |
-| Change log entries | 5 | 9 (cumulative 14) |
-| Acceptance criteria met | 4 / 4 | 10 / 11 |
-| Open follow-up items | 3 | 5 |
-| Primary blocker | hardware validation | hardware validation, narrowed to audio |
+| Metric | Sprint 1 | Sprint 2 | Sprint 3 |
+| --- | --- | --- | --- |
+| Story count | 4 | 9 | 1 |
+| Change log entries | 5 | 9 (cumulative 14) | 1 (cumulative 15) |
+| Acceptance criteria met | 4 / 4 | 10 / 11 | 4 / 5 |
+| Open follow-up items | 3 | 5 | 5 |
+| Primary blocker | hardware validation | hardware validation, narrowed to audio | audio hardware bring-up |
 
-The blocker is the same one sprint 1 ended on, but it is now a single specific
-question — does sound come out of SCKI — instead of a general "validate on
-hardware".
+Sprint 3 closed the display half of the hardware blocker. The only remaining
+hardware question is now audio: does sound come out of the PCM5102A and the
+earbuds?
