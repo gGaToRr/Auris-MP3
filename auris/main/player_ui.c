@@ -272,10 +272,6 @@ static void draw_clock_and_progress(const player_status_t *st)
                  st->total_exact ? "" : "~", total);
     }
     draw_text(MARGIN, 252, times, COLOR_DIM, 3);
-
-    char percent[8];
-    snprintf(percent, sizeof(percent), "%lu%%", (unsigned long)progress_percent(st));
-    draw_text_right(s_width - MARGIN, 252, percent, COLOR_BAR_FILL, 3);
 }
 
 static void draw_footer(const player_status_t *st)
