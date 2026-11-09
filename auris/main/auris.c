@@ -2,8 +2,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "nvs_flash.h"
+
+// BLE
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
@@ -13,13 +18,33 @@
 #include "ble/ble_scan.h"
 #include "ble/ble_connect.h"
 
-#define TAG "auris"
+// Display
+#include "esp_lcd_panel_ops.h"
+#include "driver/spi_master.h"
+#include "esp_lcd_panel_io.h"
+#include "esp_lcd_ili9488.h"
+
+// Audio
+#include "driver/i2s_std.h"
+#include "esp_vfs_fat.h"
+
+#include "decoder_mp3.h"
+#include "player_status.h"
+#include "player_ui.h"
+
+static const char *TAG = "AURIS_MAIN";
+
+static wl_handle_t s_wl_handle = WL_INVALID_HANDLE;
+
+// ===========================================================================
+// BLE
+// ===========================================================================
 
 static void start_advertising(void)
 {
     struct ble_gap_adv_params adv_params = {
-        .conn_mode = BLE_GAP_CONN_MODE_UND,  // connectable
-        .disc_mode = BLE_GAP_DISC_MODE_GEN,  // general discoverable
+        .conn_mode = BLE_GAP_CONN_MODE_UND,
+        .disc_mode = BLE_GAP_DISC_MODE_GEN,
     };
 
     struct ble_hs_adv_fields fields = {0};
@@ -44,18 +69,16 @@ static void start_advertising(void)
 
 static void configure_security(void)
 {
-    // SC Only + bonding + MITM
     ble_hs_cfg.sm_io_cap     = BLE_SM_IO_CAP_NO_IO;
     ble_hs_cfg.sm_bonding    = 1;
     ble_hs_cfg.sm_mitm       = 1;
-    ble_hs_cfg.sm_sc         = 1;   // Secure Connections
+    ble_hs_cfg.sm_sc         = 1;
     ble_hs_cfg.sm_our_key_dist   = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
     ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
 }
 
 static void on_sync(void)
 {
-    // Generate RPA from IRK stored in NVS
     int rc = ble_hs_util_ensure_addr(0);
     if (rc != 0) {
         ESP_LOGE(TAG, "ble_hs_util_ensure_addr failed: %d", rc);
@@ -112,7 +135,6 @@ static void cmd_loop(void *param)
     (void)param;
     char line[64];
 
-    // Wait for BLE stack to sync
     vTaskDelay(pdMS_TO_TICKS(500));
 
     for (;;) {
@@ -159,14 +181,441 @@ static void cmd_loop(void *param)
     }
 }
 
+// ===========================================================================
+// DISPLAY
+// ===========================================================================
+
+// Display Configuration
+#define LCD_H_RES 480
+#define LCD_V_RES 320
+
+#define LCD_SPI_HOST SPI2_HOST
+#define LCD_SCLK_PIN GPIO_NUM_12
+#define LCD_MOSI_PIN GPIO_NUM_11
+#define LCD_CS_PIN GPIO_NUM_10
+#define LCD_DC_PIN GPIO_NUM_9
+#define LCD_RST_PIN GPIO_NUM_6
+#define LCD_BL_PIN GPIO_NUM_7
+
+// I2S Hardware Output Pins for ESP32-S3
+#define I2S_MCLK_PIN GPIO_NUM_8
+#define I2S_BCLK_PIN GPIO_NUM_16
+#define I2S_WS_PIN GPIO_NUM_17
+#define I2S_DOUT_PIN GPIO_NUM_18
+
+// minimp3's mp3dec_decode_frame() uses ~14.5 KB of stack for mp3dec_scratch_t.
+// 32 KB keeps ~45% headroom over the measured 18.1 KB peak.
+#define AUDIO_TASK_STACK_SIZE (36 * 1024)
+
+static i2s_chan_handle_t tx_handle = NULL;
+
+void mount_virtual_storage(void)
+{
+    const esp_vfs_fat_mount_config_t mount_config = {
+        .max_files = 4,
+        .format_if_mount_failed = false,
+        .allocation_unit_size = CONFIG_WL_SECTOR_SIZE};
+
+    esp_err_t err = esp_vfs_fat_spiflash_mount_rw_wl("/sdcard", "storage", &mount_config, &s_wl_handle);
+    if (err != ESP_OK)
+    {
+        ESP_LOGE("STORAGE", "Failed to mount FATFS (0x%x)", err);
+        return;
+    }
+    ESP_LOGI("STORAGE", "Virtual storage mounted at /sdcard");
+}
+
+void display_task(void *pvParameters)
+{
+    (void)pvParameters;
+    ESP_LOGI(TAG, "Initializing ILI9488 SPI display...");
+
+    gpio_config_t bl_config = {
+        .pin_bit_mask = 1ULL << LCD_BL_PIN,
+        .mode = GPIO_MODE_OUTPUT,
+    };
+    ESP_ERROR_CHECK(gpio_config(&bl_config));
+    gpio_set_level(LCD_BL_PIN, 0);
+
+    spi_bus_config_t bus_config = {
+        .sclk_io_num = LCD_SCLK_PIN,
+        .mosi_io_num = LCD_MOSI_PIN,
+        .miso_io_num = -1,
+        .quadwp_io_num = -1,
+        .quadhd_io_num = -1,
+        .max_transfer_sz = LCD_H_RES * 40 * 3,
+    };
+    ESP_ERROR_CHECK(spi_bus_initialize(LCD_SPI_HOST, &bus_config, SPI_DMA_CH_AUTO));
+
+    esp_lcd_panel_io_handle_t io_handle = NULL;
+    esp_lcd_panel_io_spi_config_t io_config = {
+        .dc_gpio_num = LCD_DC_PIN,
+        .cs_gpio_num = LCD_CS_PIN,
+        .pclk_hz = 20 * 1000 * 1000,
+        .lcd_cmd_bits = 8,
+        .lcd_param_bits = 8,
+        .spi_mode = 0,
+        .trans_queue_depth = 10,
+    };
+    ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_SPI_HOST,
+                                             &io_config, &io_handle));
+
+    esp_lcd_panel_handle_t panel_handle = NULL;
+    esp_lcd_panel_dev_config_t panel_config = {
+        .reset_gpio_num = LCD_RST_PIN,
+        .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_BGR,
+        .bits_per_pixel = 18,
+    };
+
+    ESP_ERROR_CHECK(esp_lcd_new_panel_ili9488(io_handle, &panel_config,
+                                              LCD_H_RES * 40, &panel_handle));
+    ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle));
+    vTaskDelay(pdMS_TO_TICKS(120));
+    ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
+    ESP_ERROR_CHECK(esp_lcd_panel_swap_xy(panel_handle, true));
+    ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel_handle, true, false));
+    ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle, true));
+    esp_err_t ui_err = player_ui_init(panel_handle, LCD_H_RES, LCD_V_RES);
+    if (ui_err != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Failed to allocate display framebuffer: %s", esp_err_to_name(ui_err));
+        esp_lcd_panel_del(panel_handle);
+        esp_lcd_panel_io_del(io_handle);
+        spi_bus_free(LCD_SPI_HOST);
+        vTaskDelete(NULL);
+        return;
+    }
+    gpio_set_level(LCD_BL_PIN, 1);
+
+    ESP_LOGI(TAG, "Display initialized (%dx%d RGB565).", LCD_H_RES, LCD_V_RES);
+
+    player_status_t shown;
+    player_status_t latest;
+    bool have_shown = false;
+    int loop_count = 0;
+
+    while (1)
+    {
+        player_status_get(&latest);
+        if (!have_shown || memcmp(&latest, &shown, sizeof(latest)) != 0)
+        {
+            player_ui_render(panel_handle, &latest);
+            shown = latest;
+            have_shown = true;
+        }
+        if (++loop_count % 10 == 0)
+        {
+            ESP_LOGI(TAG, "Status [%s]: %lu/%lu s",
+                     latest.message,
+                     (unsigned long)(latest.sample_rate ? latest.samples_played / latest.sample_rate : 0),
+                     (unsigned long)latest.total_seconds);
+        }
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+}
+
+// ===========================================================================
+// AUDIO & I2S ENGINE
+// ===========================================================================
+
+static void init_i2s_tx(uint32_t sample_rate)
+{
+    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+    ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, &tx_handle, NULL));
+
+    i2s_std_config_t std_cfg = {
+        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(sample_rate),
+        .slot_cfg = I2S_STD_MSB_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_STEREO),
+        .gpio_cfg = {
+            .mclk = I2S_MCLK_PIN,
+            .bclk = I2S_BCLK_PIN,
+            .ws = I2S_WS_PIN,
+            .dout = I2S_DOUT_PIN,
+            .din = I2S_GPIO_UNUSED,
+        },
+    };
+
+    ESP_ERROR_CHECK(i2s_channel_init_std_mode(tx_handle, &std_cfg));
+    ESP_ERROR_CHECK(i2s_channel_enable(tx_handle));
+}
+
+#define AUDIO_GAIN_SHIFT 1
+#define AUDIO_FADE_SAMPLES 882
+
+static void shape_output(int32_t *pcm, size_t samples, size_t channels,
+                         bool fade_in, bool fade_out)
+{
+    if (channels == 0 || samples == 0)
+        return;
+
+    size_t frames = samples / channels;
+    size_t ramp = AUDIO_FADE_SAMPLES;
+    if (ramp > frames)
+        ramp = frames;
+
+    for (size_t i = 0; i < frames; i++)
+    {
+        uint32_t gain = 65536u;
+
+        if (fade_in && i < ramp)
+        {
+            uint32_t g = (uint32_t)(((uint64_t)i * 65536u) / ramp);
+            if (g < gain)
+                gain = g;
+        }
+        if (fade_out && frames - i <= ramp)
+        {
+            uint32_t g = (uint32_t)(((uint64_t)(frames - 1 - i) * 65536u) / ramp);
+            if (g < gain)
+                gain = g;
+        }
+
+        for (size_t ch = 0; ch < channels; ch++)
+        {
+            int32_t *s = &pcm[i * channels + ch];
+            *s = (int32_t)(((int64_t)*s * gain) >> (16 + AUDIO_GAIN_SHIFT));
+        }
+    }
+}
+
+static void convert_pcm_for_i2s(const int16_t *pcm, int32_t *i2s_pcm,
+                                size_t samples)
+{
+    for (size_t i = 0; i < samples; i++)
+    {
+        i2s_pcm[i] = (int32_t)pcm[i] << 16;
+    }
+}
+
+static void output_block(int32_t *pcm, size_t samples, size_t channels,
+                         bool fade_in, bool fade_out, uint32_t *dropped_frames)
+{
+    shape_output(pcm, samples, channels, fade_in, fade_out);
+
+    size_t bytes_written = 0;
+    esp_err_t err = i2s_channel_write(
+        tx_handle,
+        pcm,
+        samples * sizeof(int32_t),
+        &bytes_written,
+        pdMS_TO_TICKS(1000));
+    if (err != ESP_OK)
+    {
+        (*dropped_frames)++;
+        if (*dropped_frames == 1 || *dropped_frames % 100 == 0)
+        {
+            ESP_LOGW(TAG, "I2S write failed (0x%x), %lu frame(s) dropped",
+                     err, (unsigned long)*dropped_frames);
+        }
+    }
+}
+
+void audio_task(void *pvParameters)
+{
+    ESP_LOGI(TAG, "Audio task started on Core 1.");
+
+    player_status_t st = {
+        .phase = PLAYER_PHASE_LOADING,
+    };
+
+    const char *test_file = "/sdcard/track.mp3";
+    snprintf(st.path, sizeof(st.path), "%s", test_file);
+    snprintf(st.message, sizeof(st.message), "OPENING FILE");
+
+    FILE *f = fopen(test_file, "rb");
+
+    if (!f)
+    {
+        st.phase = PLAYER_PHASE_ERROR;
+        snprintf(st.message, sizeof(st.message), "FILE NOT FOUND");
+        player_status_set(&st);
+        ESP_LOGE(TAG, "Failed to open '%s'. Check if FATFS flash image created the file.", test_file);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    if (fseek(f, 0, SEEK_END) == 0)
+    {
+        long file_size = ftell(f);
+        if (file_size > 0)
+        {
+            st.file_size = (uint32_t)file_size;
+        }
+        rewind(f);
+    }
+
+    snprintf(st.message, sizeof(st.message), "DECODING");
+    player_status_set(&st);
+
+    mp3_decoder_t *dec = calloc(1, sizeof(mp3_decoder_t));
+    if (!dec)
+    {
+        st.phase = PLAYER_PHASE_ERROR;
+        snprintf(st.message, sizeof(st.message), "OUT OF MEMORY");
+        player_status_set(&st);
+        ESP_LOGE(TAG, "Failed to allocate memory for MP3 decoder structure");
+        fclose(f);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    if (mp3_decoder_init(dec, f))
+    {
+        size_t pcm_buf_samples = MP3_MAX_SAMPLES_PER_FRAME;
+        int16_t *decode_buf = malloc(pcm_buf_samples * sizeof(int16_t));
+        int32_t *out_buf = malloc(pcm_buf_samples * sizeof(int32_t));
+        int32_t *pending_buf = malloc(pcm_buf_samples * sizeof(int32_t));
+
+        if (!decode_buf || !out_buf || !pending_buf)
+        {
+            st.phase = PLAYER_PHASE_ERROR;
+            snprintf(st.message, sizeof(st.message), "OUT OF MEMORY");
+            player_status_set(&st);
+            ESP_LOGE(TAG, "Failed to allocate PCM buffer");
+            free(decode_buf);
+            free(out_buf);
+            free(pending_buf);
+            mp3_decoder_deinit(dec);
+            free(dec);
+            fclose(f);
+            vTaskDelete(NULL);
+            return;
+        }
+
+        bool i2s_initialized = false;
+        bool info_published = false;
+        uint32_t published_second = UINT32_MAX;
+        uint32_t dropped_frames = 0;
+        int64_t start_us = esp_timer_get_time();
+
+        size_t pending = 0;
+        uint32_t pending_channels = 0;
+        bool have_pending = false;
+        bool wrote_any = false;
+
+        while (1)
+        {
+            int decoded = mp3_decoder_read_pcm(dec, decode_buf, pcm_buf_samples);
+            if (decoded <= 0)
+                break;
+
+            if (!i2s_initialized)
+            {
+                init_i2s_tx(dec->info.sample_rate);
+                i2s_initialized = true;
+            }
+
+            if (!info_published)
+            {
+                st.sample_rate = dec->info.sample_rate;
+                st.bitrate_kbps = dec->info.bitrate_kbps;
+                st.channels = dec->info.channels;
+                st.bits_per_sample = dec->info.bits_per_sample;
+                st.layer = dec->info.layer;
+                st.phase = PLAYER_PHASE_PLAYING;
+                snprintf(st.message, sizeof(st.message), "PLAYING");
+                info_published = true;
+            }
+
+            uint32_t channels = dec->info.channels ? dec->info.channels : 1;
+            st.samples_played += (uint32_t)decoded / channels;
+
+            uint32_t second = st.sample_rate ? st.samples_played / st.sample_rate : 0;
+            if (second != published_second)
+            {
+                st.file_pos = mp3_decoder_position(dec);
+                st.bitrate_kbps = dec->info.bitrate_kbps;
+                st.total_seconds = mp3_decoder_total_seconds(dec);
+                st.total_exact = mp3_decoder_total_is_exact(dec);
+                player_status_set(&st);
+                published_second = second;
+            }
+
+            if (have_pending)
+            {
+                output_block(pending_buf, pending, pending_channels,
+                             !wrote_any, false, &dropped_frames);
+                wrote_any = true;
+            }
+
+            convert_pcm_for_i2s(decode_buf, out_buf, (size_t)decoded);
+            int32_t *swap = pending_buf;
+            pending_buf = out_buf;
+            out_buf = swap;
+            pending = (size_t)decoded;
+            pending_channels = channels;
+            have_pending = true;
+        }
+
+        if (have_pending)
+        {
+            output_block(pending_buf, pending, pending_channels,
+                         !wrote_any, true, &dropped_frames);
+        }
+
+        int64_t elapsed_us = esp_timer_get_time() - start_us;
+        ESP_LOGI(TAG, "Decoded %lu samples in %lld ms (%lu frame(s) dropped)",
+                 (unsigned long)st.samples_played,
+                 (long long)(elapsed_us / 1000),
+                 (unsigned long)dropped_frames);
+        ESP_LOGI(TAG, "Track: %s, %u kbps%s, %u s (gain 1/%d)",
+                 dec->info.vbr ? "VBR" : "CBR",
+                 (unsigned)dec->info.bitrate_kbps,
+                 mp3_decoder_total_is_exact(dec) ? "" : " (estimated duration)",
+                 (unsigned)mp3_decoder_total_seconds(dec),
+                 1 << AUDIO_GAIN_SHIFT);
+
+        st.phase = PLAYER_PHASE_FINISHED;
+        st.file_pos = st.file_size ? st.file_size : st.file_pos;
+        st.total_seconds = mp3_decoder_total_seconds(dec);
+        st.total_exact = mp3_decoder_total_is_exact(dec);
+        snprintf(st.message, sizeof(st.message), "PLAYBACK COMPLETE");
+        player_status_set(&st);
+
+        free(decode_buf);
+        free(out_buf);
+        free(pending_buf);
+        mp3_decoder_deinit(dec);
+    }
+    else
+    {
+        st.phase = PLAYER_PHASE_ERROR;
+        snprintf(st.message, sizeof(st.message), "DECODER INIT FAILED");
+        player_status_set(&st);
+        ESP_LOGE(TAG, "Failed to initialize MP3 decoder context");
+    }
+
+    free(dec);
+    fclose(f);
+
+    ESP_LOGI(TAG, "Audio task stack: %d bytes still free (high-water mark)",
+             (int)uxTaskGetStackHighWaterMark(NULL));
+
+    ESP_LOGI(TAG, "Audio playback task completed.");
+    vTaskDelete(NULL);
+}
+
+// ===========================================================================
+// APPLICATION ENTRY POINT
+// ===========================================================================
 void app_main(void)
 {
+    ESP_LOGI(TAG, "Starting Auris MP3 Project...");
+
+    // NVS (needed by BLE bonding and Wi-Fi)
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         nvs_flash_erase();
         nvs_flash_init();
     }
 
+    // Mount Virtual Storage (FATFS on SPI Flash)
+    mount_virtual_storage();
+
+    // Shared playback state must exist before either task publishes to it
+    player_status_init();
+
+    // BLE stack
     ret = nimble_port_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "nimble_port_init failed: %d", ret);
@@ -179,5 +628,33 @@ void app_main(void)
 
     nimble_port_freertos_init(nimble_host_task);
 
+    // BLE command loop
     xTaskCreate(cmd_loop, "cmd", 4096, NULL, 5, NULL);
+
+    // Display task on Core 0
+    if (xTaskCreatePinnedToCore(
+            display_task,
+            "gui_task",
+            8192,
+            NULL,
+            2,
+            NULL,
+            0) != pdPASS)
+    {
+        ESP_LOGE(TAG, "Failed to create display task");
+    }
+
+    // Audio task on Core 1
+    if (xTaskCreatePinnedToCore(
+            audio_task,
+            "audio_task",
+            AUDIO_TASK_STACK_SIZE,
+            NULL,
+            5,
+            NULL,
+            1) != pdPASS)
+    {
+        ESP_LOGE(TAG, "Failed to create audio task (stack size %d bytes)",
+                 (int)AUDIO_TASK_STACK_SIZE);
+    }
 }
