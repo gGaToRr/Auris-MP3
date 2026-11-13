@@ -7,7 +7,8 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.os.ParcelUuid
+import android.os.Handler
+import android.os.Looper
 import java.util.UUID
 
 object AurisUuids {
@@ -19,12 +20,25 @@ object AurisUuids {
 
 enum class AurisState { IDLE, SCANNING, CONNECTING, CONNECTED, READY }
 
+data class AurisPlayerStatus(
+    val phase: String = "IDLE",
+    val track: String = "",
+    val positionSec: Int = 0,
+    val durationSec: Int = 0,
+    val sampleRate: Int = 0,
+    val bitrateKbps: Int = 0,
+    val volume: Int = 80,
+    val trackIndex: Int = 0,
+    val trackCount: Int = 0,
+)
+
 @SuppressLint("MissingPermission")
 class AurisBle(
     private val context: Context,
     private val onStateChange: (AurisState) -> Unit,
     private val onNotification: (String) -> Unit,
     private val onLog: (String) -> Unit,
+    private val onStatus: (AurisPlayerStatus) -> Unit,
 ) {
     private val adapter: BluetoothAdapter? =
         (context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
@@ -34,6 +48,11 @@ class AurisBle(
     private var rxChar: BluetoothGattCharacteristic? = null
     private var state = AurisState.IDLE
     private var pendingSubscribe = false
+    private var userDisconnect = false
+
+    private val handler = Handler(Looper.getMainLooper())
+    private var reconnectDelay = 2000L
+    private var lastDevice: BluetoothDevice? = null
 
     private fun setState(s: AurisState) {
         state = s
@@ -45,8 +64,6 @@ class AurisBle(
     private val bondReceiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context, intent: Intent) {
             if (intent.action != BluetoothDevice.ACTION_BOND_STATE_CHANGED) return
-            val device = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE)
-                ?: return
             val bondState = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, -1)
             val prevState = intent.getIntExtra(BluetoothDevice.EXTRA_PREVIOUS_BOND_STATE, -1)
 
@@ -78,12 +95,11 @@ class AurisBle(
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             val name = result.device.name ?: result.scanRecord?.deviceName
-            onLog("Found: ${name ?: "?"} rssi=${result.rssi}")
-
             if (name == "AURIS") {
                 scanner?.stopScan(this)
                 setState(AurisState.CONNECTING)
-                onLog("Connecting to AURIS...")
+                onLog("Found AURIS (rssi=${result.rssi}) — connecting...")
+                lastDevice = result.device
                 result.device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
             }
         }
@@ -96,6 +112,7 @@ class AurisBle(
 
     fun startScan() {
         if (state != AurisState.IDLE) return
+        userDisconnect = false
         scanner = adapter?.bluetoothLeScanner
         if (scanner == null) {
             onLog("BLE not available")
@@ -119,12 +136,40 @@ class AurisBle(
         }
     }
 
+    // ── Auto-reconnect ──
+
+    private val reconnectRunnable = Runnable {
+        if (state != AurisState.IDLE || userDisconnect) return@Runnable
+        val dev = lastDevice
+        if (dev == null) {
+            onLog("Reconnect: no known device, scanning...")
+            startScan()
+            return@Runnable
+        }
+        onLog("Reconnecting (delay=${reconnectDelay}ms)...")
+        setState(AurisState.CONNECTING)
+        dev.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+    }
+
+    private fun scheduleReconnect() {
+        if (userDisconnect) return
+        onLog("Will reconnect in ${reconnectDelay / 1000}s...")
+        handler.postDelayed(reconnectRunnable, reconnectDelay)
+        reconnectDelay = (reconnectDelay * 2).coerceAtMost(30_000L)
+    }
+
+    private fun resetReconnectDelay() {
+        reconnectDelay = 2000L
+    }
+
     // ── GATT ──
 
     private val gattCallback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
             if (newState == BluetoothProfile.STATE_CONNECTED) {
                 gatt = g
+                lastDevice = g.device
+                resetReconnectDelay()
                 setState(AurisState.CONNECTED)
 
                 val bond = g.device.bondState
@@ -139,10 +184,12 @@ class AurisBle(
                 }
             } else {
                 onLog("Disconnected (status=$status)")
+                gatt?.close()
                 gatt = null
                 rxChar = null
                 pendingSubscribe = false
                 setState(AurisState.IDLE)
+                scheduleReconnect()
             }
         }
 
@@ -166,7 +213,7 @@ class AurisBle(
                 return
             }
 
-            onLog("Services OK — subscribing to notifications...")
+            onLog("Services OK — subscribing...")
             g.setCharacteristicNotification(txChar, true)
             val desc = txChar.getDescriptor(AurisUuids.CCCD)
             if (desc != null) {
@@ -186,10 +233,8 @@ class AurisBle(
                     onLog("Subscribed — ready")
                     setState(AurisState.READY)
                 } else {
-                    onLog("CCCD write failed: status=$status — retrying in 1s...")
-                    android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                        gatt?.let { retrySubscribe(it) }
-                    }, 1000)
+                    onLog("CCCD write failed: $status — retrying...")
+                    handler.postDelayed({ gatt?.let { retrySubscribe(it) } }, 1000)
                 }
             }
         }
@@ -198,8 +243,16 @@ class AurisBle(
         override fun onCharacteristicChanged(g: BluetoothGatt, c: BluetoothGattCharacteristic) {
             if (c.uuid == AurisUuids.CHAR_TX) {
                 val msg = c.value?.toString(Charsets.UTF_8) ?: ""
-                onLog("← $msg")
-                onNotification(msg)
+                if (msg.startsWith("STATUS:")) {
+                    parseStatus(msg)
+                } else {
+                    onLog("← $msg")
+                    onNotification(msg)
+                    if (msg == "OK:UNPAIR") {
+                        onLog("Removing local bond for re-pairing...")
+                        removeBond(g.device)
+                    }
+                }
             }
         }
 
@@ -212,6 +265,28 @@ class AurisBle(
         }
     }
 
+    // ── Status parser ──
+    // FORMAT: STATUS:phase|filename|pos_s|dur_s|samplerate|bitrate|vol|idx|count
+
+    private fun parseStatus(raw: String) {
+        val payload = raw.removePrefix("STATUS:")
+        val parts = payload.split("|")
+        if (parts.size < 9) return
+
+        val status = AurisPlayerStatus(
+            phase = parts[0],
+            track = parts[1],
+            positionSec = parts[2].toIntOrNull() ?: 0,
+            durationSec = parts[3].toIntOrNull() ?: 0,
+            sampleRate = parts[4].toIntOrNull() ?: 0,
+            bitrateKbps = parts[5].toIntOrNull() ?: 0,
+            volume = parts[6].toIntOrNull() ?: 80,
+            trackIndex = parts[7].toIntOrNull() ?: 0,
+            trackCount = parts[8].toIntOrNull() ?: 0,
+        )
+        onStatus(status)
+    }
+
     private fun retrySubscribe(g: BluetoothGatt) {
         val svc = g.getService(AurisUuids.SERVICE) ?: return
         val txChar = svc.getCharacteristic(AurisUuids.CHAR_TX) ?: return
@@ -221,6 +296,18 @@ class AurisBle(
         desc.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
         @Suppress("DEPRECATION")
         g.writeDescriptor(desc)
+    }
+
+    // ── Bond removal ──
+
+    private fun removeBond(device: BluetoothDevice) {
+        try {
+            val method = device.javaClass.getMethod("removeBond")
+            val result = method.invoke(device) as? Boolean
+            onLog("removeBond: $result")
+        } catch (e: Exception) {
+            onLog("removeBond failed: ${e.message}")
+        }
     }
 
     // ── Commands ──
@@ -239,6 +326,8 @@ class AurisBle(
     }
 
     fun disconnect() {
+        userDisconnect = true
+        handler.removeCallbacks(reconnectRunnable)
         pendingSubscribe = false
         gatt?.disconnect()
         gatt?.close()
@@ -250,6 +339,7 @@ class AurisBle(
 
     fun destroy() {
         try { context.unregisterReceiver(bondReceiver) } catch (_: Exception) {}
+        handler.removeCallbacksAndMessages(null)
         disconnect()
     }
 }

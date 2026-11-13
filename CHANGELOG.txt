@@ -1,0 +1,51 @@
+AURIS-MP3 — Changelog
+=====================
+
+## v0.2.0 — 2026-11-13
+
+### BLE protocol — bidirectional status push
+- ESP32 broadcasts player status every 500ms via TX notifications
+- Frame format: STATUS:phase|filename|pos_s|dur_s|samplerate|bitrate|vol|idx|count
+- Android parses status frames into AurisPlayerStatus data class
+- Status only sent when data changes (phase, second, track)
+
+### New player commands
+- PAUSE / RESUME toggle (pauses decode loop, resumes in place)
+- PREV track (wraps around playlist)
+- VOL+ / VOL- (10% steps, 0-100, applied in shape_output gain)
+- Volume integrated into status broadcast
+- Android command grid: PREV, PLAY, PAUSE, NEXT, RESTART, UNPAIR
+
+### BLE stability
+- Android auto-reconnect with exponential backoff (2s → 30s max)
+- Remembers last connected device for fast reconnect
+- User disconnect cancels reconnect loop
+- CCCD write retry on encryption race condition
+- Proper cleanup on destroy (receiver, handler, GATT)
+
+---
+
+## v0.1.0 — 2024-11-13
+
+### ESP32 firmware
+- NimBLE BLE stack with Secure Connections (Just Works)
+- GATT service: RX (write) + TX (notify) characteristics
+- Device advertises as "AURIS" with service UUID in scan response
+- Bonding with persistent keys, anti-repairing (BLERP) protection
+- Command dispatch: PLAY, RESTART, NEXT, UNPAIR
+- Log daemon with NVS-backed persistent logging
+- Player control module with FreeRTOS command queue
+- ILI9488 display driver (480x320 landscape)
+- MP3 decoder (minimp3) with I2S output (32-bit stereo)
+- Audio fade-in/fade-out, gain control
+- FAT filesystem on SPI flash for track storage
+
+### Android companion app (com.auris.app)
+- BLE scan + connect to AURIS device
+- Bond state handling (wait for pairing before service discovery)
+- CCCD subscribe with retry on encryption race
+- Command buttons: PLAY, RESTART, NEXT, UNPAIR
+- Live log console with color-coded messages
+- Dark theme with gold accent
+- Adaptive launcher icon
+- Signed release APK (v2 signature)

@@ -1,6 +1,8 @@
 #include "ble_gatt_svc.h"
+#include "ble_connect.h"
 #include "log/auris_log.h"
 #include "player/player_ctrl.h"
+#include "player_status.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -10,6 +12,8 @@
 #include "host/ble_store.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 // ── Auris custom service UUID ──
 // a1b2c3d4-0001-4000-8000-00805f9b34fb
@@ -50,6 +54,73 @@ static void try_send_validation(void)
         ALOG_W("GATT", "Welcome notify failed: %d", rc);
 }
 
+// ── Status broadcaster task ──
+
+static const char *phase_str(player_phase_t p)
+{
+    switch (p) {
+    case PLAYER_PHASE_IDLE:     return "IDLE";
+    case PLAYER_PHASE_LOADING:  return "LOADING";
+    case PLAYER_PHASE_PLAYING:  return "PLAYING";
+    case PLAYER_PHASE_FINISHED: return "FINISHED";
+    case PLAYER_PHASE_ERROR:    return "ERROR";
+    default:                    return "UNKNOWN";
+    }
+}
+
+static const char *basename_of(const char *path)
+{
+    const char *slash = strrchr(path, '/');
+    return slash ? slash + 1 : path;
+}
+
+static void status_broadcast_task(void *arg)
+{
+    (void)arg;
+    player_status_t prev = {0};
+    bool have_prev = false;
+
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(500));
+
+        if (!s_subscribed)
+            continue;
+
+        player_status_t st;
+        player_status_get(&st);
+
+        bool changed = !have_prev
+            || st.phase != prev.phase
+            || st.samples_played / (st.sample_rate ? st.sample_rate : 1)
+               != prev.samples_played / (prev.sample_rate ? prev.sample_rate : 1)
+            || strcmp(st.path, prev.path) != 0;
+
+        if (!changed)
+            continue;
+
+        uint32_t pos_sec = st.sample_rate ? st.samples_played / st.sample_rate : 0;
+        uint8_t vol = player_ctrl_get_volume();
+        int idx = player_ctrl_track_index();
+        int total = player_ctrl_track_count();
+
+        // STATUS:phase|filename|pos_s|dur_s|samplerate|bitrate|vol|idx|count
+        char frame[128];
+        snprintf(frame, sizeof(frame), "STATUS:%s|%s|%lu|%lu|%lu|%lu|%u|%d|%d",
+                 phase_str(st.phase),
+                 st.path[0] ? basename_of(st.path) : "",
+                 (unsigned long)pos_sec,
+                 (unsigned long)st.total_seconds,
+                 (unsigned long)st.sample_rate,
+                 (unsigned long)st.bitrate_kbps,
+                 vol, idx, total);
+
+        ble_gatt_svc_notify((const uint8_t *)frame, (uint16_t)strlen(frame));
+
+        prev = st;
+        have_prev = true;
+    }
+}
+
 // ── Characteristic callbacks ──
 
 static int on_notif_rx_write(uint16_t conn_handle, uint16_t attr_handle,
@@ -78,17 +149,29 @@ static int on_notif_rx_write(uint16_t conn_handle, uint16_t attr_handle,
     if (strcmp((char *)buf, "PLAY") == 0) {
         player_ctrl_send(PLAYER_CMD_PLAY);
         resp = "OK:PLAY";
+    } else if (strcmp((char *)buf, "PAUSE") == 0) {
+        player_ctrl_send(PLAYER_CMD_PAUSE);
+        resp = "OK:PAUSE";
     } else if (strcmp((char *)buf, "RESTART") == 0) {
         player_ctrl_send(PLAYER_CMD_RESTART);
         resp = "OK:RESTART";
     } else if (strcmp((char *)buf, "NEXT") == 0) {
         player_ctrl_send(PLAYER_CMD_NEXT);
         resp = "OK:NEXT";
+    } else if (strcmp((char *)buf, "PREV") == 0) {
+        player_ctrl_send(PLAYER_CMD_PREV);
+        resp = "OK:PREV";
+    } else if (strcmp((char *)buf, "VOL+") == 0) {
+        player_ctrl_send(PLAYER_CMD_VOL_UP);
+        resp = "OK:VOL+";
+    } else if (strcmp((char *)buf, "VOL-") == 0) {
+        player_ctrl_send(PLAYER_CMD_VOL_DOWN);
+        resp = "OK:VOL-";
     } else if (strcmp((char *)buf, "UNPAIR") == 0) {
         ALOG_W("GATT", "Erasing all bonding data");
         ble_store_clear();
+        ble_connect_allow_repairing();
         resp = "OK:UNPAIR";
-        // Notify, then disconnect — peer must re-pair
         ble_gatt_svc_notify((const uint8_t *)resp, (uint16_t)strlen(resp));
         ble_gap_terminate(conn_handle, BLE_ERR_REM_USER_CONN_TERM);
         return 0;
@@ -153,6 +236,7 @@ void ble_gatt_svc_init(void)
         return;
     }
 
+    xTaskCreate(status_broadcast_task, "ble_status", 4096, NULL, 3, NULL);
     printf("[gatt] Auris service registered\n");
 }
 

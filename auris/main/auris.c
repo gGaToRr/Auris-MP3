@@ -369,7 +369,6 @@ static void init_i2s_tx(uint32_t sample_rate)
     ESP_ERROR_CHECK(i2s_channel_enable(tx_handle));
 }
 
-#define AUDIO_GAIN_SHIFT 1
 #define AUDIO_FADE_SAMPLES 882
 
 static void shape_output(int32_t *pcm, size_t samples, size_t channels,
@@ -383,19 +382,21 @@ static void shape_output(int32_t *pcm, size_t samples, size_t channels,
     if (ramp > frames)
         ramp = frames;
 
+    uint32_t vol = player_ctrl_get_volume();
+
     for (size_t i = 0; i < frames; i++)
     {
-        uint32_t gain = 65536u;
+        uint32_t gain = (vol * 65536u) / 100u;
 
         if (fade_in && i < ramp)
         {
-            uint32_t g = (uint32_t)(((uint64_t)i * 65536u) / ramp);
+            uint32_t g = (uint32_t)(((uint64_t)i * gain) / ramp);
             if (g < gain)
                 gain = g;
         }
         if (fade_out && frames - i <= ramp)
         {
-            uint32_t g = (uint32_t)(((uint64_t)(frames - 1 - i) * 65536u) / ramp);
+            uint32_t g = (uint32_t)(((uint64_t)(frames - 1 - i) * gain) / ramp);
             if (g < gain)
                 gain = g;
         }
@@ -403,7 +404,7 @@ static void shape_output(int32_t *pcm, size_t samples, size_t channels,
         for (size_t ch = 0; ch < channels; ch++)
         {
             int32_t *s = &pcm[i * channels + ch];
-            *s = (int32_t)(((int64_t)*s * gain) >> (16 + AUDIO_GAIN_SHIFT));
+            *s = (int32_t)(((int64_t)*s * gain) >> 16);
         }
     }
 }
@@ -512,14 +513,37 @@ static player_cmd_t play_file(const char *path, bool *i2s_ready)
     bool have_pending = false;
     bool wrote_any = false;
 
+    bool paused = false;
+
     while (1) {
         // Check for BLE commands (non-blocking)
         player_cmd_t cmd = player_ctrl_peek();
-        if (cmd == PLAYER_CMD_RESTART || cmd == PLAYER_CMD_NEXT) {
-            ALOG_I("AUD", "Command received: %s",
-                   cmd == PLAYER_CMD_RESTART ? "RESTART" : "NEXT");
+        if (cmd == PLAYER_CMD_RESTART || cmd == PLAYER_CMD_NEXT
+            || cmd == PLAYER_CMD_PREV) {
+            ALOG_I("AUD", "Command: %d", cmd);
             interrupted = cmd;
             break;
+        }
+        if (cmd == PLAYER_CMD_PAUSE) {
+            paused = !paused;
+            ALOG_I("AUD", paused ? "Paused" : "Resumed");
+            snprintf(st.message, sizeof(st.message), paused ? "PAUSED" : "PLAYING");
+            st.phase = paused ? PLAYER_PHASE_IDLE : PLAYER_PHASE_PLAYING;
+            player_status_set(&st);
+        }
+        if (cmd == PLAYER_CMD_VOL_UP) {
+            uint8_t v = player_ctrl_get_volume();
+            player_ctrl_set_volume(v + 10 > 100 ? 100 : v + 10);
+            ALOG_I("AUD", "Volume: %d", player_ctrl_get_volume());
+        }
+        if (cmd == PLAYER_CMD_VOL_DOWN) {
+            uint8_t v = player_ctrl_get_volume();
+            player_ctrl_set_volume(v < 10 ? 0 : v - 10);
+            ALOG_I("AUD", "Volume: %d", player_ctrl_get_volume());
+        }
+        if (paused) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
         }
 
         int decoded = mp3_decoder_read_pcm(dec, decode_buf, pcm_buf_samples);
@@ -624,15 +648,19 @@ void audio_task(void *pvParameters)
             break;
         case PLAYER_CMD_NEXT:
             player_ctrl_advance();
-            ALOG_I("AUD", "Next track → %s",
+            ALOG_I("AUD", "Next → %s",
+                   player_ctrl_current_path() ? player_ctrl_current_path() : "none");
+            break;
+        case PLAYER_CMD_PREV:
+            player_ctrl_rewind();
+            ALOG_I("AUD", "Prev → %s",
                    player_ctrl_current_path() ? player_ctrl_current_path() : "none");
             break;
         default:
-            // Natural end — wait for a command
-            ALOG_I("AUD", "Waiting for command...");
-            cmd = player_ctrl_recv(portMAX_DELAY);
-            if (cmd == PLAYER_CMD_NEXT)
-                player_ctrl_advance();
+            // Natural end — advance to next, or wait
+            player_ctrl_advance();
+            ALOG_I("AUD", "Track ended → %s",
+                   player_ctrl_current_path() ? player_ctrl_current_path() : "none");
             break;
         }
     }

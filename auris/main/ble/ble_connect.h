@@ -17,6 +17,9 @@ uint16_t ble_connect_get_handle(void);
 // GAP event callback — also used by advertising to handle incoming connections
 int ble_connect_gap_event_cb(struct ble_gap_event *event, void *arg);
 
+// Allow the next re-pairing attempt (call before disconnecting after UNPAIR)
+void ble_connect_allow_repairing(void);
+
 // Called to restart advertising after disconnect (set by app_main)
 typedef void (*ble_connect_on_disconnect_fn)(void);
 void ble_connect_set_on_disconnect(ble_connect_on_disconnect_fn fn);

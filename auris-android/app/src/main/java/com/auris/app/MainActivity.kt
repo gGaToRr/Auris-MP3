@@ -19,6 +19,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -29,6 +30,7 @@ class MainActivity : ComponentActivity() {
     private val bleState = mutableStateOf(AurisState.IDLE)
     private val logs = mutableStateListOf<String>()
     private val lastNotif = mutableStateOf("")
+    private val playerStatus = mutableStateOf(AurisPlayerStatus())
 
     private val permLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -46,6 +48,7 @@ class MainActivity : ComponentActivity() {
             onStateChange = { runOnUiThread { bleState.value = it } },
             onNotification = { runOnUiThread { lastNotif.value = it } },
             onLog = { msg -> runOnUiThread { logs.add(msg); if (logs.size > 200) logs.removeAt(0) } },
+            onStatus = { st -> runOnUiThread { playerStatus.value = st } },
         )
 
         setContent {
@@ -54,6 +57,7 @@ class MainActivity : ComponentActivity() {
                     state = bleState.value,
                     logs = logs,
                     lastNotif = lastNotif.value,
+                    status = playerStatus.value,
                     onConnect = ::connect,
                     onDisconnect = { ble?.disconnect() },
                     onCommand = { ble?.sendCommand(it) },
@@ -89,7 +93,6 @@ class MainActivity : ComponentActivity() {
 private val DarkGold = Color(0xFFD4A847)
 private val DarkBg = Color(0xFF121212)
 private val SurfaceDark = Color(0xFF1E1E1E)
-private val CardDark = Color(0xFF2A2A2A)
 
 @Composable
 fun AurisTheme(content: @Composable () -> Unit) {
@@ -113,6 +116,7 @@ fun AurisScreen(
     state: AurisState,
     logs: List<String>,
     lastNotif: String,
+    status: AurisPlayerStatus,
     onConnect: () -> Unit,
     onDisconnect: () -> Unit,
     onCommand: (String) -> Unit,
@@ -124,27 +128,24 @@ fun AurisScreen(
             Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .padding(horizontal = 20.dp, vertical = 16.dp),
+                .padding(horizontal = 20.dp, vertical = 12.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             // Header
             Text(
                 "AURIS",
-                fontSize = 32.sp,
+                fontSize = 28.sp,
                 fontWeight = FontWeight.Bold,
                 color = DarkGold,
                 letterSpacing = 8.sp,
             )
 
             Spacer(Modifier.height(4.dp))
-
-            // Status chip
             StatusChip(state)
-
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(8.dp))
 
             // Notification banner
-            if (lastNotif.isNotEmpty()) {
+            if (lastNotif.isNotEmpty() && !lastNotif.startsWith("OK:")) {
                 Surface(
                     shape = RoundedCornerShape(12.dp),
                     color = DarkGold.copy(alpha = 0.15f),
@@ -158,7 +159,7 @@ fun AurisScreen(
                         fontSize = 15.sp,
                     )
                 }
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(8.dp))
             }
 
             // Connect / disconnect
@@ -169,7 +170,7 @@ fun AurisScreen(
                     shape = RoundedCornerShape(14.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = DarkGold),
                 ) {
-                    Text("⦿  Connect to AURIS", color = Color.Black, fontWeight = FontWeight.Bold)
+                    Text("Connect to AURIS", color = Color.Black, fontWeight = FontWeight.Bold)
                 }
             } else if (state == AurisState.SCANNING || state == AurisState.CONNECTING) {
                 CircularProgressIndicator(color = DarkGold)
@@ -180,16 +181,18 @@ fun AurisScreen(
                 )
             }
 
-            // Command buttons
+            // Player status + controls
             if (state == AurisState.READY || state == AurisState.CONNECTED) {
-                CommandGrid(onCommand, onDisconnect)
+                PlayerCard(status, onCommand)
+                Spacer(Modifier.height(8.dp))
+                ControlRow(onCommand, onDisconnect)
             }
 
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(8.dp))
 
             // Log console
             Text("Console", color = Color.Gray, fontSize = 12.sp, fontWeight = FontWeight.Medium)
-            Spacer(Modifier.height(6.dp))
+            Spacer(Modifier.height(4.dp))
 
             val listState = rememberLazyListState()
             LaunchedEffect(logs.size) {
@@ -222,6 +225,137 @@ fun AurisScreen(
     }
 }
 
+// ── Player card ──
+
+@Composable
+fun PlayerCard(status: AurisPlayerStatus, onCommand: (String) -> Unit) {
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = Color(0xFF1A1A1A),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(16.dp)) {
+            // Track name
+            Text(
+                status.track.ifEmpty { "No track" },
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color.White,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+
+            Spacer(Modifier.height(4.dp))
+
+            // Phase + track info
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    status.phase,
+                    fontSize = 12.sp,
+                    color = when (status.phase) {
+                        "PLAYING" -> Color(0xFF66BB6A)
+                        "PAUSED" -> Color(0xFFFFA726)
+                        "ERROR" -> Color(0xFFEF5350)
+                        else -> Color.Gray
+                    },
+                    fontWeight = FontWeight.Medium,
+                )
+                if (status.trackCount > 0) {
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        "${status.trackIndex + 1}/${status.trackCount}",
+                        fontSize = 12.sp,
+                        color = Color.Gray,
+                    )
+                }
+                if (status.bitrateKbps > 0) {
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        "${status.bitrateKbps}kbps",
+                        fontSize = 12.sp,
+                        color = Color.Gray,
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(8.dp))
+
+            // Progress bar
+            val progress = if (status.durationSec > 0)
+                status.positionSec.toFloat() / status.durationSec else 0f
+
+            LinearProgressIndicator(
+                progress = { progress },
+                modifier = Modifier.fillMaxWidth().height(4.dp),
+                color = DarkGold,
+                trackColor = Color(0xFF333333),
+            )
+
+            Spacer(Modifier.height(4.dp))
+
+            // Time
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text(formatTime(status.positionSec), fontSize = 12.sp, color = Color.Gray)
+                Text(formatTime(status.durationSec), fontSize = 12.sp, color = Color.Gray)
+            }
+
+            Spacer(Modifier.height(8.dp))
+
+            // Volume
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center,
+            ) {
+                CmdBtn("−", Color.Gray) { onCommand("VOL-") }
+                Spacer(Modifier.width(12.dp))
+                Text("Vol ${status.volume}%", fontSize = 13.sp, color = Color.White)
+                Spacer(Modifier.width(12.dp))
+                CmdBtn("+", Color.Gray) { onCommand("VOL+") }
+            }
+        }
+    }
+}
+
+@Composable
+fun CmdBtn(label: String, color: Color, onClick: () -> Unit) {
+    Button(
+        onClick = onClick,
+        modifier = Modifier.size(36.dp),
+        shape = RoundedCornerShape(8.dp),
+        colors = ButtonDefaults.buttonColors(containerColor = color.copy(alpha = 0.2f)),
+        contentPadding = PaddingValues(0.dp),
+    ) {
+        Text(label, color = color, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+    }
+}
+
+// ── Control row ──
+
+@Composable
+fun ControlRow(onCommand: (String) -> Unit, onDisconnect: () -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            CmdButton(Modifier.weight(1f), "PREV", "⏮", Color(0xFF42A5F5), onCommand)
+            CmdButton(Modifier.weight(1f), "PLAY", "▶", DarkGold, onCommand)
+            CmdButton(Modifier.weight(1f), "PAUSE", "⏸", Color(0xFFFFA726), onCommand)
+            CmdButton(Modifier.weight(1f), "NEXT", "⏭", Color(0xFF66BB6A), onCommand)
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            CmdButton(Modifier.weight(1f), "RESTART", "↺", Color(0xFF42A5F5), onCommand)
+            CmdButton(Modifier.weight(1f), "UNPAIR", "✕", Color(0xFFEF5350), onCommand)
+        }
+        OutlinedButton(
+            onClick = onDisconnect,
+            modifier = Modifier.fillMaxWidth().height(40.dp),
+            shape = RoundedCornerShape(12.dp),
+            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.Gray),
+        ) {
+            Text("Disconnect", fontSize = 13.sp)
+        }
+    }
+}
+
 @Composable
 fun StatusChip(state: AurisState) {
     val (label, color) = when (state) {
@@ -246,29 +380,6 @@ fun StatusChip(state: AurisState) {
 }
 
 @Composable
-fun CommandGrid(onCommand: (String) -> Unit, onDisconnect: () -> Unit) {
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Spacer(Modifier.height(4.dp))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            CmdButton(Modifier.weight(1f), "PLAY", "▶", DarkGold, onCommand)
-            CmdButton(Modifier.weight(1f), "RESTART", "↺", Color(0xFF42A5F5), onCommand)
-        }
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            CmdButton(Modifier.weight(1f), "NEXT", "⏭", Color(0xFF66BB6A), onCommand)
-            CmdButton(Modifier.weight(1f), "UNPAIR", "✕", Color(0xFFEF5350), onCommand)
-        }
-        OutlinedButton(
-            onClick = onDisconnect,
-            modifier = Modifier.fillMaxWidth().height(44.dp),
-            shape = RoundedCornerShape(12.dp),
-            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.Gray),
-        ) {
-            Text("Disconnect", fontSize = 13.sp)
-        }
-    }
-}
-
-@Composable
 fun CmdButton(
     modifier: Modifier,
     cmd: String,
@@ -278,12 +389,19 @@ fun CmdButton(
 ) {
     Button(
         onClick = { onCommand(cmd) },
-        modifier = modifier.height(56.dp),
-        shape = RoundedCornerShape(14.dp),
+        modifier = modifier.height(48.dp),
+        shape = RoundedCornerShape(12.dp),
         colors = ButtonDefaults.buttonColors(containerColor = color.copy(alpha = 0.15f)),
+        contentPadding = PaddingValues(horizontal = 4.dp),
     ) {
-        Text(symbol, color = color, fontSize = 20.sp)
-        Spacer(Modifier.width(6.dp))
-        Text(cmd, color = color, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+        Text(symbol, color = color, fontSize = 16.sp)
+        Spacer(Modifier.width(4.dp))
+        Text(cmd, color = color, fontWeight = FontWeight.Bold, fontSize = 11.sp)
     }
+}
+
+private fun formatTime(seconds: Int): String {
+    val m = seconds / 60
+    val s = seconds % 60
+    return "%d:%02d".format(m, s)
 }

@@ -11,6 +11,7 @@
 
 static uint16_t s_conn_handle;
 static bool     s_connected;
+static bool     s_allow_repairing;
 static ble_connect_on_disconnect_fn s_on_disconnect;
 
 static bool is_already_bonded(const ble_addr_t *addr)
@@ -93,9 +94,14 @@ int ble_connect_gap_event_cb(struct ble_gap_event *event, void *arg)
     }
 
     case BLE_GAP_EVENT_REPEAT_PAIRING: {
-        // Anti-BLERP: reject re-pairing on an already-bonded link.
-        // A legitimate peer never needs to re-pair from scratch once bonded.
-        // Accepting would let an attacker replace the stored LTK.
+        if (s_allow_repairing) {
+            ALOG_I("BLE", "Re-pairing ALLOWED (post-unpair)");
+            struct ble_gap_conn_desc desc;
+            ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc);
+            ble_gap_unpair(&desc.peer_id_addr);
+            s_allow_repairing = false;
+            return BLE_GAP_REPEAT_PAIRING_RETRY;
+        }
         ALOG_W("BLE", "Re-pairing attempt REJECTED (anti-BLERP)");
         return BLE_GAP_REPEAT_PAIRING_IGNORE;
     }
@@ -160,6 +166,11 @@ bool ble_connect_is_connected(void)
 uint16_t ble_connect_get_handle(void)
 {
     return s_conn_handle;
+}
+
+void ble_connect_allow_repairing(void)
+{
+    s_allow_repairing = true;
 }
 
 void ble_connect_set_on_disconnect(ble_connect_on_disconnect_fn fn)

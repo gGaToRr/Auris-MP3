@@ -9,12 +9,15 @@
 #define CMD_QUEUE_DEPTH 4
 #define MAX_TRACKS      16
 #define PATH_MAX_LEN    272
+#define VOL_DEFAULT     80
+#define VOL_STEP        10
 
 static QueueHandle_t s_cmd_queue;
 
 static char s_tracks[MAX_TRACKS][PATH_MAX_LEN];
 static int  s_track_count;
 static int  s_current;
+static uint8_t s_volume = VOL_DEFAULT;
 
 void player_ctrl_init(void)
 {
@@ -85,7 +88,28 @@ void player_ctrl_advance(void)
         s_current = (s_current + 1) % s_track_count;
 }
 
+void player_ctrl_rewind(void)
+{
+    if (s_track_count > 0)
+        s_current = (s_current - 1 + s_track_count) % s_track_count;
+}
+
 int player_ctrl_track_count(void)
 {
     return s_track_count;
+}
+
+int player_ctrl_track_index(void)
+{
+    return s_current;
+}
+
+uint8_t player_ctrl_get_volume(void)
+{
+    return s_volume;
+}
+
+void player_ctrl_set_volume(uint8_t vol)
+{
+    s_volume = vol > 100 ? 100 : vol;
 }
