@@ -1,3 +1,11 @@
 auris/build/
-auris/sdkconfig
 auris/sdkconfig.old
+auris/.cache/
+
+# Android
+auris-android/.gradle/
+auris-android/app/build/
+auris-android/build/
+auris-android/local.properties
+auris-android/*.jks
+auris-android/*.apk

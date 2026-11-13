@@ -1,4 +1,6 @@
 #include "ble_connect.h"
+#include "ble_gatt_svc.h"
+#include "log/auris_log.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -36,57 +38,40 @@ int ble_connect_gap_event_cb(struct ble_gap_event *event, void *arg)
         if (event->connect.status == 0) {
             s_conn_handle = event->connect.conn_handle;
             s_connected   = true;
+            ble_gatt_svc_on_connect(s_conn_handle);
 
             struct ble_gap_conn_desc desc;
             ble_gap_conn_find(s_conn_handle, &desc);
 
-            printf("\n========== CONNECTED ==========\n");
-            printf("  handle      : %d\n", s_conn_handle);
-            printf("  peer addr   : %02X:%02X:%02X:%02X:%02X:%02X\n",
+            ALOG_I("BLE", "Connected handle=%d peer=%02X:%02X:%02X:%02X:%02X:%02X type=%s",
+                   s_conn_handle,
                    desc.peer_id_addr.val[5], desc.peer_id_addr.val[4],
                    desc.peer_id_addr.val[3], desc.peer_id_addr.val[2],
-                   desc.peer_id_addr.val[1], desc.peer_id_addr.val[0]);
-            printf("  addr type   : %s\n",
+                   desc.peer_id_addr.val[1], desc.peer_id_addr.val[0],
                    desc.peer_id_addr.type == 0 ? "public" :
                    desc.peer_id_addr.type == 1 ? "random" :
                    desc.peer_id_addr.type == 2 ? "rpa+public" :
-                   desc.peer_id_addr.type == 3 ? "rpa+random" : "unknown");
-            printf("  our addr    : %02X:%02X:%02X:%02X:%02X:%02X\n",
-                   desc.our_id_addr.val[5], desc.our_id_addr.val[4],
-                   desc.our_id_addr.val[3], desc.our_id_addr.val[2],
-                   desc.our_id_addr.val[1], desc.our_id_addr.val[0]);
-            printf("  conn itvl   : %d (x1.25ms = %.1fms)\n",
-                   desc.conn_itvl, desc.conn_itvl * 1.25);
-            printf("  latency     : %d\n", desc.conn_latency);
-            printf("  timeout     : %d (x10ms = %dms)\n",
-                   desc.supervision_timeout, desc.supervision_timeout * 10);
-            printf("  encrypted   : %s\n", desc.sec_state.encrypted ? "yes" : "no");
-            printf("  authenticated: %s\n", desc.sec_state.authenticated ? "yes" : "no");
-            printf("  bonded      : %s\n", desc.sec_state.bonded ? "yes" : "no");
-            printf("  role        : %s\n", desc.role == 0 ? "central" : "peripheral");
-            printf("===============================\n\n");
+                   desc.peer_id_addr.type == 3 ? "rpa+random" : "?");
 
             int rc = ble_gap_security_initiate(s_conn_handle);
             if (rc != 0)
-                printf("[sec] security initiate failed: %d\n", rc);
+                ALOG_W("BLE", "Security initiate failed: %d", rc);
         } else {
-            printf("[conn] connect failed: status=%d\n", event->connect.status);
+            ALOG_W("BLE", "Connect failed: status=%d", event->connect.status);
             s_connected = false;
         }
         break;
 
     case BLE_GAP_EVENT_DISCONNECT: {
         struct ble_gap_conn_desc *d = &event->disconnect.conn;
-        printf("\n========== DISCONNECTED ==========\n");
-        printf("  peer addr : %02X:%02X:%02X:%02X:%02X:%02X\n",
+        ALOG_I("BLE", "Disconnected peer=%02X:%02X:%02X:%02X:%02X:%02X reason=0x%02X",
                d->peer_id_addr.val[5], d->peer_id_addr.val[4],
                d->peer_id_addr.val[3], d->peer_id_addr.val[2],
-               d->peer_id_addr.val[1], d->peer_id_addr.val[0]);
-        printf("  reason    : 0x%02X (%d)\n",
-               event->disconnect.reason, event->disconnect.reason);
-        printf("==================================\n\n");
+               d->peer_id_addr.val[1], d->peer_id_addr.val[0],
+               event->disconnect.reason);
         s_connected   = false;
         s_conn_handle = 0;
+        ble_gatt_svc_on_disconnect();
         if (s_on_disconnect)
             s_on_disconnect();
         break;
@@ -96,14 +81,13 @@ int ble_connect_gap_event_cb(struct ble_gap_event *event, void *arg)
         struct ble_gap_conn_desc desc;
         ble_gap_conn_find(event->enc_change.conn_handle, &desc);
         if (event->enc_change.status == 0) {
-            printf("\n---------- ENCRYPTION ON ----------\n");
-            printf("  encrypted    : yes\n");
-            printf("  authenticated: %s\n", desc.sec_state.authenticated ? "yes" : "no");
-            printf("  bonded       : %s\n", desc.sec_state.bonded ? "yes" : "no");
-            printf("  key size     : %d\n", desc.sec_state.key_size);
-            printf("-----------------------------------\n\n");
+            ALOG_I("BLE", "Encrypted auth=%s bonded=%s keysize=%d",
+                   desc.sec_state.authenticated ? "yes" : "no",
+                   desc.sec_state.bonded ? "yes" : "no",
+                   desc.sec_state.key_size);
+            ble_gatt_svc_on_encrypted(event->enc_change.conn_handle);
         } else {
-            printf("[sec] encryption failed: status=%d\n", event->enc_change.status);
+            ALOG_W("BLE", "Encryption failed: status=%d", event->enc_change.status);
         }
         break;
     }
@@ -112,19 +96,30 @@ int ble_connect_gap_event_cb(struct ble_gap_event *event, void *arg)
         // Anti-BLERP: reject re-pairing on an already-bonded link.
         // A legitimate peer never needs to re-pair from scratch once bonded.
         // Accepting would let an attacker replace the stored LTK.
-        printf("[sec] re-pairing attempt REJECTED (anti-BLERP)\n");
+        ALOG_W("BLE", "Re-pairing attempt REJECTED (anti-BLERP)");
         return BLE_GAP_REPEAT_PAIRING_IGNORE;
     }
 
     case BLE_GAP_EVENT_PASSKEY_ACTION:
-        // SC numeric comparison — auto-confirm for now (no display).
-        // TODO: when we have a display, show the passkey for user confirm.
         if (event->passkey.params.action == BLE_SM_IOACT_NUMCMP) {
             printf("[sec] numeric comparison: %06lu — auto-confirm\n",
                    (unsigned long)event->passkey.params.numcmp);
             struct ble_sm_io pk = { .action = BLE_SM_IOACT_NUMCMP, .numcmp_accept = 1 };
             ble_sm_inject_io(event->passkey.conn_handle, &pk);
         }
+        break;
+
+    case BLE_GAP_EVENT_SUBSCRIBE:
+        ALOG_I("BLE", "Subscribe conn=%d notify=%d",
+               event->subscribe.conn_handle,
+               event->subscribe.cur_notify);
+        ble_gatt_svc_on_subscribe(event->subscribe.conn_handle,
+                                  event->subscribe.cur_notify);
+        break;
+
+    case BLE_GAP_EVENT_MTU:
+        ALOG_I("BLE", "MTU updated conn=%d mtu=%d",
+               event->mtu.conn_handle, event->mtu.value);
         break;
     }
     return 0;

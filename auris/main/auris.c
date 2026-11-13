@@ -17,6 +17,9 @@
 
 #include "ble/ble_scan.h"
 #include "ble/ble_connect.h"
+#include "ble/ble_gatt_svc.h"
+#include "log/auris_log.h"
+#include "player/player_ctrl.h"
 
 // Display
 #include "esp_lcd_panel_ops.h"
@@ -40,6 +43,10 @@ static wl_handle_t s_wl_handle = WL_INVALID_HANDLE;
 // BLE
 // ===========================================================================
 
+static const ble_uuid128_t adv_svc_uuid =
+    BLE_UUID128_INIT(0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80,
+                     0x00, 0x40, 0x01, 0x00, 0xd4, 0xc3, 0xb2, 0xa1);
+
 static void start_advertising(void)
 {
     struct ble_gap_adv_params adv_params = {
@@ -58,6 +65,13 @@ static void start_advertising(void)
 
     ble_gap_adv_set_fields(&fields);
 
+    // Scan response carries the service UUID so Android can filter on it
+    struct ble_hs_adv_fields rsp = {0};
+    rsp.uuids128 = (ble_uuid128_t *)&adv_svc_uuid;
+    rsp.num_uuids128 = 1;
+    rsp.uuids128_is_complete = 1;
+    ble_gap_adv_rsp_set_fields(&rsp);
+
     int rc = ble_gap_adv_start(BLE_OWN_ADDR_RPA_PUBLIC_DEFAULT, NULL,
                                BLE_HS_FOREVER, &adv_params,
                                ble_connect_gap_event_cb, NULL);
@@ -71,7 +85,7 @@ static void configure_security(void)
 {
     ble_hs_cfg.sm_io_cap     = BLE_SM_IO_CAP_NO_IO;
     ble_hs_cfg.sm_bonding    = 1;
-    ble_hs_cfg.sm_mitm       = 1;
+    ble_hs_cfg.sm_mitm       = 0;  // NoIO → Just Works, MITM impossible
     ble_hs_cfg.sm_sc         = 1;
     ble_hs_cfg.sm_our_key_dist   = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
     ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
@@ -89,14 +103,10 @@ static void on_sync(void)
     ble_connect_set_on_disconnect(start_advertising);
     start_advertising();
 
-    printf("\n=== Auris-MP3 — BLE Ready ===\n");
-    printf("Advertising as \"Auris-MP3\" — connect from your phone\n");
-    printf("Commands:\n");
-    printf("  scan [sec]  — scan for BLE devices\n");
-    printf("  conn <idx>  — connect to device by index\n");
-    printf("  disc        — disconnect\n");
-    printf("  list        — show last scan results\n");
-    printf("=============================\n\n");
+    printf("\n=== AURIS — BLE Ready ===\n");
+    printf("Advertising as \"AURIS\"\n");
+    printf("Commands: scan | conn <idx> | disc | list | notify <msg> | status\n");
+    printf("=========================\n\n");
 }
 
 static void on_reset(int reason)
@@ -174,6 +184,26 @@ static void cmd_loop(void *param)
 
         } else if (strcmp(line, "list") == 0) {
             ble_scan_print_results();
+
+        } else if (strncmp(line, "notify", 6) == 0) {
+            const char *msg = line + 6;
+            while (*msg == ' ') msg++;
+            if (*msg == '\0') {
+                printf("usage: notify <message>\n");
+            } else {
+                int rc = ble_gatt_svc_notify((const uint8_t *)msg,
+                                             (uint16_t)strlen(msg));
+                if (rc == 0)
+                    printf("[notify] sent: %s\n", msg);
+            }
+
+        } else if (strcmp(line, "status") == 0) {
+            printf("\n--- BLE Status ---\n");
+            printf("  connected : %s\n", ble_connect_is_connected() ? "yes" : "no");
+            printf("  subscribed: %s\n", ble_gatt_svc_is_subscribed() ? "yes" : "no");
+            if (ble_connect_is_connected())
+                printf("  conn handle: %d\n", ble_connect_get_handle());
+            printf("------------------\n");
 
         } else if (line[0] != '\0') {
             printf("unknown command: %s\n", line);
@@ -410,37 +440,29 @@ static void output_block(int32_t *pcm, size_t samples, size_t channels,
     }
 }
 
-void audio_task(void *pvParameters)
+// Returns the command that interrupted playback, or PLAYER_CMD_NONE on natural end.
+static player_cmd_t play_file(const char *path, bool *i2s_ready)
 {
-    ESP_LOGI(TAG, "Audio task started on Core 1.");
+    player_cmd_t interrupted = PLAYER_CMD_NONE;
+    player_status_t st = { .phase = PLAYER_PHASE_LOADING };
 
-    player_status_t st = {
-        .phase = PLAYER_PHASE_LOADING,
-    };
-
-    const char *test_file = "/sdcard/track.mp3";
-    snprintf(st.path, sizeof(st.path), "%s", test_file);
+    snprintf(st.path, sizeof(st.path), "%s", path);
     snprintf(st.message, sizeof(st.message), "OPENING FILE");
+    player_status_set(&st);
+    ALOG_I("AUD", "Opening %s", path);
 
-    FILE *f = fopen(test_file, "rb");
-
-    if (!f)
-    {
+    FILE *f = fopen(path, "rb");
+    if (!f) {
         st.phase = PLAYER_PHASE_ERROR;
         snprintf(st.message, sizeof(st.message), "FILE NOT FOUND");
         player_status_set(&st);
-        ESP_LOGE(TAG, "Failed to open '%s'. Check if FATFS flash image created the file.", test_file);
-        vTaskDelete(NULL);
-        return;
+        ALOG_E("AUD", "Cannot open %s", path);
+        return PLAYER_CMD_NONE;
     }
 
-    if (fseek(f, 0, SEEK_END) == 0)
-    {
-        long file_size = ftell(f);
-        if (file_size > 0)
-        {
-            st.file_size = (uint32_t)file_size;
-        }
+    if (fseek(f, 0, SEEK_END) == 0) {
+        long sz = ftell(f);
+        if (sz > 0) st.file_size = (uint32_t)sz;
         rewind(f);
     }
 
@@ -448,151 +470,172 @@ void audio_task(void *pvParameters)
     player_status_set(&st);
 
     mp3_decoder_t *dec = calloc(1, sizeof(mp3_decoder_t));
-    if (!dec)
-    {
+    if (!dec) {
         st.phase = PLAYER_PHASE_ERROR;
         snprintf(st.message, sizeof(st.message), "OUT OF MEMORY");
         player_status_set(&st);
-        ESP_LOGE(TAG, "Failed to allocate memory for MP3 decoder structure");
         fclose(f);
-        vTaskDelete(NULL);
-        return;
+        return PLAYER_CMD_NONE;
     }
 
-    if (mp3_decoder_init(dec, f))
-    {
-        size_t pcm_buf_samples = MP3_MAX_SAMPLES_PER_FRAME;
-        int16_t *decode_buf = malloc(pcm_buf_samples * sizeof(int16_t));
-        int32_t *out_buf = malloc(pcm_buf_samples * sizeof(int32_t));
-        int32_t *pending_buf = malloc(pcm_buf_samples * sizeof(int32_t));
-
-        if (!decode_buf || !out_buf || !pending_buf)
-        {
-            st.phase = PLAYER_PHASE_ERROR;
-            snprintf(st.message, sizeof(st.message), "OUT OF MEMORY");
-            player_status_set(&st);
-            ESP_LOGE(TAG, "Failed to allocate PCM buffer");
-            free(decode_buf);
-            free(out_buf);
-            free(pending_buf);
-            mp3_decoder_deinit(dec);
-            free(dec);
-            fclose(f);
-            vTaskDelete(NULL);
-            return;
-        }
-
-        bool i2s_initialized = false;
-        bool info_published = false;
-        uint32_t published_second = UINT32_MAX;
-        uint32_t dropped_frames = 0;
-        int64_t start_us = esp_timer_get_time();
-
-        size_t pending = 0;
-        uint32_t pending_channels = 0;
-        bool have_pending = false;
-        bool wrote_any = false;
-
-        while (1)
-        {
-            int decoded = mp3_decoder_read_pcm(dec, decode_buf, pcm_buf_samples);
-            if (decoded <= 0)
-                break;
-
-            if (!i2s_initialized)
-            {
-                init_i2s_tx(dec->info.sample_rate);
-                i2s_initialized = true;
-            }
-
-            if (!info_published)
-            {
-                st.sample_rate = dec->info.sample_rate;
-                st.bitrate_kbps = dec->info.bitrate_kbps;
-                st.channels = dec->info.channels;
-                st.bits_per_sample = dec->info.bits_per_sample;
-                st.layer = dec->info.layer;
-                st.phase = PLAYER_PHASE_PLAYING;
-                snprintf(st.message, sizeof(st.message), "PLAYING");
-                info_published = true;
-            }
-
-            uint32_t channels = dec->info.channels ? dec->info.channels : 1;
-            st.samples_played += (uint32_t)decoded / channels;
-
-            uint32_t second = st.sample_rate ? st.samples_played / st.sample_rate : 0;
-            if (second != published_second)
-            {
-                st.file_pos = mp3_decoder_position(dec);
-                st.bitrate_kbps = dec->info.bitrate_kbps;
-                st.total_seconds = mp3_decoder_total_seconds(dec);
-                st.total_exact = mp3_decoder_total_is_exact(dec);
-                player_status_set(&st);
-                published_second = second;
-            }
-
-            if (have_pending)
-            {
-                output_block(pending_buf, pending, pending_channels,
-                             !wrote_any, false, &dropped_frames);
-                wrote_any = true;
-            }
-
-            convert_pcm_for_i2s(decode_buf, out_buf, (size_t)decoded);
-            int32_t *swap = pending_buf;
-            pending_buf = out_buf;
-            out_buf = swap;
-            pending = (size_t)decoded;
-            pending_channels = channels;
-            have_pending = true;
-        }
-
-        if (have_pending)
-        {
-            output_block(pending_buf, pending, pending_channels,
-                         !wrote_any, true, &dropped_frames);
-        }
-
-        int64_t elapsed_us = esp_timer_get_time() - start_us;
-        ESP_LOGI(TAG, "Decoded %lu samples in %lld ms (%lu frame(s) dropped)",
-                 (unsigned long)st.samples_played,
-                 (long long)(elapsed_us / 1000),
-                 (unsigned long)dropped_frames);
-        ESP_LOGI(TAG, "Track: %s, %u kbps%s, %u s (gain 1/%d)",
-                 dec->info.vbr ? "VBR" : "CBR",
-                 (unsigned)dec->info.bitrate_kbps,
-                 mp3_decoder_total_is_exact(dec) ? "" : " (estimated duration)",
-                 (unsigned)mp3_decoder_total_seconds(dec),
-                 1 << AUDIO_GAIN_SHIFT);
-
-        st.phase = PLAYER_PHASE_FINISHED;
-        st.file_pos = st.file_size ? st.file_size : st.file_pos;
-        st.total_seconds = mp3_decoder_total_seconds(dec);
-        st.total_exact = mp3_decoder_total_is_exact(dec);
-        snprintf(st.message, sizeof(st.message), "PLAYBACK COMPLETE");
-        player_status_set(&st);
-
-        free(decode_buf);
-        free(out_buf);
-        free(pending_buf);
-        mp3_decoder_deinit(dec);
-    }
-    else
-    {
+    if (!mp3_decoder_init(dec, f)) {
         st.phase = PLAYER_PHASE_ERROR;
         snprintf(st.message, sizeof(st.message), "DECODER INIT FAILED");
         player_status_set(&st);
-        ESP_LOGE(TAG, "Failed to initialize MP3 decoder context");
+        ALOG_E("AUD", "Decoder init failed for %s", path);
+        free(dec);
+        fclose(f);
+        return PLAYER_CMD_NONE;
     }
 
+    size_t pcm_buf_samples = MP3_MAX_SAMPLES_PER_FRAME;
+    int16_t *decode_buf = malloc(pcm_buf_samples * sizeof(int16_t));
+    int32_t *out_buf    = malloc(pcm_buf_samples * sizeof(int32_t));
+    int32_t *pending_buf = malloc(pcm_buf_samples * sizeof(int32_t));
+
+    if (!decode_buf || !out_buf || !pending_buf) {
+        st.phase = PLAYER_PHASE_ERROR;
+        snprintf(st.message, sizeof(st.message), "OUT OF MEMORY");
+        player_status_set(&st);
+        free(decode_buf); free(out_buf); free(pending_buf);
+        mp3_decoder_deinit(dec); free(dec); fclose(f);
+        return PLAYER_CMD_NONE;
+    }
+
+    bool info_published = false;
+    uint32_t published_second = UINT32_MAX;
+    uint32_t dropped_frames = 0;
+    int64_t start_us = esp_timer_get_time();
+
+    size_t pending = 0;
+    uint32_t pending_channels = 0;
+    bool have_pending = false;
+    bool wrote_any = false;
+
+    while (1) {
+        // Check for BLE commands (non-blocking)
+        player_cmd_t cmd = player_ctrl_peek();
+        if (cmd == PLAYER_CMD_RESTART || cmd == PLAYER_CMD_NEXT) {
+            ALOG_I("AUD", "Command received: %s",
+                   cmd == PLAYER_CMD_RESTART ? "RESTART" : "NEXT");
+            interrupted = cmd;
+            break;
+        }
+
+        int decoded = mp3_decoder_read_pcm(dec, decode_buf, pcm_buf_samples);
+        if (decoded <= 0)
+            break;
+
+        if (!*i2s_ready) {
+            init_i2s_tx(dec->info.sample_rate);
+            *i2s_ready = true;
+        }
+
+        if (!info_published) {
+            st.sample_rate    = dec->info.sample_rate;
+            st.bitrate_kbps   = dec->info.bitrate_kbps;
+            st.channels       = dec->info.channels;
+            st.bits_per_sample = dec->info.bits_per_sample;
+            st.layer          = dec->info.layer;
+            st.phase          = PLAYER_PHASE_PLAYING;
+            snprintf(st.message, sizeof(st.message), "PLAYING");
+            info_published = true;
+        }
+
+        uint32_t channels = dec->info.channels ? dec->info.channels : 1;
+        st.samples_played += (uint32_t)decoded / channels;
+
+        uint32_t second = st.sample_rate ? st.samples_played / st.sample_rate : 0;
+        if (second != published_second) {
+            st.file_pos      = mp3_decoder_position(dec);
+            st.bitrate_kbps  = dec->info.bitrate_kbps;
+            st.total_seconds = mp3_decoder_total_seconds(dec);
+            st.total_exact   = mp3_decoder_total_is_exact(dec);
+            player_status_set(&st);
+            published_second = second;
+        }
+
+        if (have_pending) {
+            output_block(pending_buf, pending, pending_channels,
+                         !wrote_any, false, &dropped_frames);
+            wrote_any = true;
+        }
+
+        convert_pcm_for_i2s(decode_buf, out_buf, (size_t)decoded);
+        int32_t *swap = pending_buf;
+        pending_buf = out_buf;
+        out_buf = swap;
+        pending = (size_t)decoded;
+        pending_channels = channels;
+        have_pending = true;
+    }
+
+    if (have_pending && interrupted == PLAYER_CMD_NONE)
+        output_block(pending_buf, pending, pending_channels,
+                     !wrote_any, true, &dropped_frames);
+
+    int64_t elapsed_us = esp_timer_get_time() - start_us;
+    ALOG_I("AUD", "Played %lu samples in %lld ms (%lu dropped)",
+           (unsigned long)st.samples_played,
+           (long long)(elapsed_us / 1000),
+           (unsigned long)dropped_frames);
+
+    if (interrupted == PLAYER_CMD_NONE) {
+        st.phase = PLAYER_PHASE_FINISHED;
+        st.file_pos = st.file_size ? st.file_size : st.file_pos;
+        st.total_seconds = mp3_decoder_total_seconds(dec);
+        st.total_exact   = mp3_decoder_total_is_exact(dec);
+        snprintf(st.message, sizeof(st.message), "PLAYBACK COMPLETE");
+        player_status_set(&st);
+    }
+
+    free(decode_buf);
+    free(out_buf);
+    free(pending_buf);
+    mp3_decoder_deinit(dec);
     free(dec);
     fclose(f);
 
-    ESP_LOGI(TAG, "Audio task stack: %d bytes still free (high-water mark)",
-             (int)uxTaskGetStackHighWaterMark(NULL));
+    return interrupted;
+}
 
-    ESP_LOGI(TAG, "Audio playback task completed.");
-    vTaskDelete(NULL);
+void audio_task(void *pvParameters)
+{
+    (void)pvParameters;
+    ALOG_I("AUD", "Audio task started on Core 1");
+
+    bool i2s_ready = false;
+
+    // Auto-play first track on boot
+    while (1) {
+        const char *path = player_ctrl_current_path();
+        if (!path) {
+            ALOG_W("AUD", "No tracks available, waiting for command...");
+            player_ctrl_recv(portMAX_DELAY);
+            player_ctrl_scan_tracks();
+            continue;
+        }
+
+        player_cmd_t cmd = play_file(path, &i2s_ready);
+
+        switch (cmd) {
+        case PLAYER_CMD_RESTART:
+            ALOG_I("AUD", "Restarting current track");
+            break;
+        case PLAYER_CMD_NEXT:
+            player_ctrl_advance();
+            ALOG_I("AUD", "Next track → %s",
+                   player_ctrl_current_path() ? player_ctrl_current_path() : "none");
+            break;
+        default:
+            // Natural end — wait for a command
+            ALOG_I("AUD", "Waiting for command...");
+            cmd = player_ctrl_recv(portMAX_DELAY);
+            if (cmd == PLAYER_CMD_NEXT)
+                player_ctrl_advance();
+            break;
+        }
+    }
 }
 
 // ===========================================================================
@@ -600,61 +643,50 @@ void audio_task(void *pvParameters)
 // ===========================================================================
 void app_main(void)
 {
-    ESP_LOGI(TAG, "Starting Auris MP3 Project...");
+    ESP_LOGI(TAG, "=== AURIS Boot ===");
 
-    // NVS (needed by BLE bonding and Wi-Fi)
+    // 1. NVS (needed by log daemon + BLE bonding)
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         nvs_flash_erase();
         nvs_flash_init();
     }
 
-    // Mount Virtual Storage (FATFS on SPI Flash)
+    // 2. Storage (needed by log daemon)
     mount_virtual_storage();
 
-    // Shared playback state must exist before either task publishes to it
-    player_status_init();
+    // 3. Log daemon (earliest possible — everything after this is logged)
+    auris_log_init();
 
-    // BLE stack
+    // 4. BLE daemon
+    ALOG_I("BLE", "Starting BLE daemon...");
+
     ret = nimble_port_init();
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "nimble_port_init failed: %d", ret);
+        ALOG_E("BLE", "nimble init failed: %d", ret);
         return;
     }
 
     ble_hs_cfg.sync_cb  = on_sync;
     ble_hs_cfg.reset_cb = on_reset;
-    ble_svc_gap_device_name_set("Auris-MP3");
-
+    ble_svc_gap_device_name_set("AURIS");
+    ble_gatt_svc_init();
     nimble_port_freertos_init(nimble_host_task);
+    xTaskCreate(cmd_loop, "ble_cmd", 4096, NULL, 5, NULL);
 
-    // BLE command loop
-    xTaskCreate(cmd_loop, "cmd", 4096, NULL, 5, NULL);
+    ALOG_I("BLE", "AURIS advertising started");
 
-    // Display task on Core 0
-    if (xTaskCreatePinnedToCore(
-            display_task,
-            "gui_task",
-            8192,
-            NULL,
-            2,
-            NULL,
-            0) != pdPASS)
-    {
-        ESP_LOGE(TAG, "Failed to create display task");
-    }
+    // 5. Player (display + audio)
+    player_ctrl_init();
+    player_status_init();
 
-    // Audio task on Core 1
-    if (xTaskCreatePinnedToCore(
-            audio_task,
-            "audio_task",
-            AUDIO_TASK_STACK_SIZE,
-            NULL,
-            5,
-            NULL,
-            1) != pdPASS)
-    {
-        ESP_LOGE(TAG, "Failed to create audio task (stack size %d bytes)",
-                 (int)AUDIO_TASK_STACK_SIZE);
-    }
+    if (xTaskCreatePinnedToCore(display_task, "gui_task", 8192,
+                                NULL, 2, NULL, 0) != pdPASS)
+        ALOG_E("SYS", "Failed to create display task");
+
+    if (xTaskCreatePinnedToCore(audio_task, "audio_task", AUDIO_TASK_STACK_SIZE,
+                                NULL, 5, NULL, 1) != pdPASS)
+        ALOG_E("SYS", "Failed to create audio task");
+
+    ALOG_I("SYS", "=== AURIS Ready ===");
 }

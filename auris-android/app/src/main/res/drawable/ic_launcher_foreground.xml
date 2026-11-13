@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Gold circle -->
+    <path
+        android:fillColor="#D4A847"
+        android:pathData="M54,54m-28,0a28,28 0,1 1,56 0a28,28 0,1 1,-56 0" />
+    <!-- A letter -->
+    <path
+        android:fillColor="#121212"
+        android:pathData="M46.5,68 L43,68 L54,38 L54,38 L65,68 L61.5,68 L58.5,60 L49.5,60 Z M50.5,57 L57.5,57 L54,47 Z" />
+</vector>
